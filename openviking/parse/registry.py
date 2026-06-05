@@ -26,6 +26,7 @@ from openviking.parse.parsers.pdf import PDFParser
 from openviking.parse.parsers.powerpoint import PowerPointParser
 from openviking.parse.parsers.text import TextParser
 from openviking.parse.parsers.word import WordParser
+from openviking.parse.parsers.word_v2 import WordParserWithImages
 from openviking.parse.parsers.zip_parser import ZipParser
 from openviking_cli.utils import get_logger
 from openviking_cli.utils.config.parser_config import ParserConfig
@@ -67,7 +68,8 @@ class ParserRegistry:
         self.register("html", HTMLParser(config=self._parser_configs.get("html")))
 
         # Register markitdown-inspired parsers (built-in)
-        self.register("word", WordParser(config=self._parser_configs.get("word")))
+        # self.register("word", WordParser(config=self._parser_configs.get("word")))
+        self.register("word", WordParserWithImages(config=self._parser_configs.get("word")))
         self.register("legacy_doc", LegacyDocParser(config=self._parser_configs.get("legacy_doc")))
         self.register("powerpoint", PowerPointParser(config=self._parser_configs.get("powerpoint")))
         self.register("excel", ExcelParser(config=self._parser_configs.get("excel")))

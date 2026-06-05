@@ -10,6 +10,7 @@ from .pdf import PDFParser
 from .powerpoint import PowerPointParser
 from .text import TextParser
 from .word import WordParser
+from .word_v2 import WordParserWithImages
 from .zip_parser import ZipParser
 
 __all__ = [
@@ -22,5 +23,6 @@ __all__ = [
     "PowerPointParser",
     "TextParser",
     "WordParser",
+    "WordParserWithImages",
     "ZipParser",
 ]
