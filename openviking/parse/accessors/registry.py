@@ -61,6 +61,14 @@ class AccessorRegistry:
         except Exception as e:
             logger.debug(f"[AccessorRegistry] Failed to register FeishuAccessor: {e}")
 
+        # ElinkAccessor - handles Elink (Honor private Feishu) documents
+        try:
+            from .elink_accessor import ElinkAccessor
+
+            self.register(ElinkAccessor())
+        except Exception as e:
+            logger.debug(f"[AccessorRegistry] Failed to register ElinkAccessor: {e}")
+
         # LocalAccessor - handles local files (lowest priority)
         try:
             from .local_accessor import LocalAccessor
