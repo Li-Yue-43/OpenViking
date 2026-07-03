@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0
 """Elink Wiki service -- mirrors lark-oapi wiki.v2.space API."""
 
-from typing import TYPE_CHECKING
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .client import ElinkClient
@@ -34,3 +34,28 @@ class ElinkWikiSpace:
             "GET", "/wiki/v2/spaces/get_node", params={"token": token}
         )
         return GetNodeSpaceResponse(data)
+
+    async def list_nodes(
+        self,
+        space_id: str,
+        parent_node_token: Optional[str] = None,
+        page_size: int = 50,
+        page_token: Optional[str] = None,
+    ):
+        """List child nodes of a wiki space (optionally filtered by parent)."""
+        from lark_oapi.api.wiki.v2.model.list_space_node_response import (
+            ListSpaceNodeResponse,
+        )
+
+        params: Dict[str, Any] = {"page_size": page_size}
+        if parent_node_token:
+            params["parent_node_token"] = parent_node_token
+        if page_token:
+            params["page_token"] = page_token
+
+        data = await self.client.request(
+            "GET",
+            f"/wiki/v2/spaces/{space_id}/nodes",
+            params=params,
+        )
+        return ListSpaceNodeResponse(data)

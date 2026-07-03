@@ -13,7 +13,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse
 
 from openviking_cli.utils.logger import get_logger
@@ -156,11 +156,23 @@ class ElinkAccessor(DataAccessor):
     async def access(self, source: Union[str, Path], **kwargs) -> LocalResource:
         source_str = str(source)
         try:
-            doc = await self._fetch_document(source_str)
+            doc_type, token = self._parse_elink_url(source_str)
 
-            # Q1: Create directory named after document title
-            safe_title = self._sanitize_filename(doc.title)
-            base_name = f"ov_elink_{safe_title}" if safe_title else "ov_elink_untitled"
+            if doc_type == "wiki":
+                # Treat wiki URL as a knowledge-base space: traverse all child docx nodes.
+                docs, root_title = await self._fetch_wiki_space(token, source_str)
+                meta_doc_type = "wiki"
+            else:
+                doc = await self._fetch_document(source_str)
+                docs = [(doc, [])]
+                root_title = doc.title
+                meta_doc_type = doc.doc_type
+
+            # Create directory named after the root title
+            safe_root_title = self._sanitize_filename(root_title)
+            base_name = (
+                f"ov_elink_{safe_root_title}" if safe_root_title else "ov_elink_untitled"
+            )
             temp_dir = Path(tempfile.gettempdir()) / base_name
 
             counter = 1
@@ -170,19 +182,41 @@ class ElinkAccessor(DataAccessor):
 
             temp_dir.mkdir(parents=True, exist_ok=True)
 
-            # Q2 & Q3: Download media (images and boards) and replace references
-            images_dir = temp_dir / "images"
-            markdown = await self._download_media_and_replace(doc.markdown_content, images_dir)
+            doc_metas: List[Dict[str, Any]] = []
+            for doc, dir_parts in docs:
+                parent_dir = temp_dir
+                for part in dir_parts:
+                    parent_dir = parent_dir / part
 
-            md_filename = f"{safe_title}.md" if safe_title else "document.md"
-            md_path = temp_dir / md_filename
-            md_path.write_text(markdown, encoding="utf-8")
+                # Each document gets its own folder so images stay with the doc
+                safe_title = self._sanitize_filename(doc.title) or "document"
+                doc_folder = self._unique_path(parent_dir / safe_title)
+                doc_folder.mkdir(parents=True, exist_ok=True)
+
+                # Download media (images and boards) and replace references
+                images_dir = doc_folder / "images"
+                markdown = await self._download_media_and_replace(
+                    doc.markdown_content, images_dir
+                )
+
+                md_path = doc_folder / f"{doc_folder.name}.md"
+                md_path = self._unique_path(md_path)
+                md_path.write_text(markdown, encoding="utf-8")
+
+                doc_metas.append(
+                    {
+                        "title": doc.title,
+                        "token": doc.token,
+                        "path": str(md_path.relative_to(temp_dir)),
+                        **doc.meta,
+                    }
+                )
 
             meta = {
-                "elink_doc_type": doc.doc_type,
-                "elink_token": doc.token,
-                "elink_title": doc.title,
-                **doc.meta,
+                "elink_doc_type": meta_doc_type,
+                "elink_token": token,
+                "elink_title": root_title,
+                "documents": doc_metas,
             }
 
             return LocalResource(
@@ -325,6 +359,136 @@ class ElinkAccessor(DataAccessor):
         safe = safe[:100]
         safe = safe.strip(" .")
         return safe
+
+    @staticmethod
+    def _unique_path(path: Path) -> Path:
+        """Return a unique path by appending (_1, _2, ...) if the file already exists."""
+        if not path.exists():
+            return path
+        stem = path.stem
+        suffix = path.suffix
+        parent = path.parent
+        counter = 1
+        while True:
+            candidate = parent / f"{stem}_{counter}{suffix}"
+            if not candidate.exists():
+                return candidate
+            counter += 1
+
+    # ========== Wiki Space Traversal ==========
+
+    async def _fetch_wiki_space(
+        self, token: str, original_url: str
+    ) -> Tuple[List[Tuple[ElinkDocument, List[str]]], str]:
+        """Fetch all docx documents under a wiki node, preserving directory structure.
+
+        Returns:
+            (list of (document, relative_dir_parts), root_title)
+        """
+        root_node = await self._get_wiki_node(token)
+        root_title = root_node.title or "Untitled"
+        docs = await self._collect_wiki_docs(root_node, original_url)
+        return docs, root_title
+
+    async def _get_wiki_node(self, token: str) -> Any:
+        """Get a single wiki node metadata."""
+        client = self._get_client()
+        response = await client.wiki.v2.space.get_node(token)
+        if not response.success():
+            raise RuntimeError(
+                f"Failed to resolve wiki node {token}: "
+                f"code={response.code}, msg={response.msg}"
+            )
+        return response.data.node
+
+    async def _list_wiki_nodes(
+        self, space_id: Union[int, str], parent_node_token: Optional[str] = None
+    ) -> List[Any]:
+        """List direct child nodes of a wiki space or parent node (with pagination)."""
+        client = self._get_client()
+        all_nodes: List[Any] = []
+        page_token: Optional[str] = None
+
+        while True:
+            response = await client.wiki.v2.space.list_nodes(
+                space_id=str(space_id),
+                parent_node_token=parent_node_token,
+                page_size=50,
+                page_token=page_token,
+            )
+            if not response.success():
+                raise RuntimeError(
+                    f"Failed to list wiki nodes for space {space_id} "
+                    f"parent={parent_node_token}: code={response.code}, msg={response.msg}"
+                )
+            items = response.data.items or []
+            all_nodes.extend(items)
+            if not response.data.has_more:
+                break
+            page_token = response.data.page_token
+
+        return all_nodes
+
+    async def _collect_wiki_docs(
+        self, root_node: Any, original_url: str
+    ) -> List[Tuple[ElinkDocument, List[str]]]:
+        """Recursively collect all docx documents under a wiki node."""
+        results: List[Tuple[ElinkDocument, List[str]]] = []
+
+        async def collect(node: Any, dir_parts: List[str], is_root: bool):
+            doc_type = self._WIKI_TYPE_MAP.get(node.obj_type, node.obj_type)
+
+            if doc_type == "docx":
+                doc = await self._docx_node_to_document(node, original_url)
+                results.append((doc, dir_parts))
+            else:
+                logger.debug(
+                    f"[ElinkAccessor] Skipping wiki node {node.node_token} "
+                    f"with unsupported obj_type={node.obj_type}"
+                )
+
+            # Recurse into children if present. Root's children stay at the top level;
+            # non-root nodes with children get their own subdirectory.
+            if node.has_child:
+                try:
+                    children = await self._list_wiki_nodes(
+                        node.space_id, node.node_token
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[ElinkAccessor] Failed to list children of wiki node "
+                        f"{node.node_token}: {e}"
+                    )
+                    return
+
+                child_dir_parts = dir_parts
+                if not is_root:
+                    child_dir_parts = dir_parts + [
+                        self._sanitize_filename(node.title or "untitled")
+                    ]
+                for child in children:
+                    await collect(child, child_dir_parts, is_root=False)
+
+        await collect(root_node, [], is_root=True)
+        return results
+
+    async def _docx_node_to_document(
+        self, node: Any, original_url: str
+    ) -> ElinkDocument:
+        """Fetch a single docx wiki node and wrap it as ElinkDocument."""
+        markdown, doc_title = await self._parse_docx(node.obj_token)
+        title = node.title or doc_title
+        meta = {
+            "wiki_node_token": node.node_token,
+            "original_url": original_url,
+        }
+        return ElinkDocument(
+            doc_type="docx",
+            token=node.obj_token,
+            markdown_content=markdown,
+            title=title,
+            meta=meta,
+        )
 
     # ========== Wiki Resolution ==========
 
