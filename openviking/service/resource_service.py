@@ -422,6 +422,7 @@ class ResourceService:
         enforce_public_remote_targets: bool = False,
         resource_lock: Optional[LockLease] = None,
         stage_callback: Optional[Callable[[str], Any]] = None,
+        progress_callback: Optional[Callable[[Dict[str, Any]], Any]] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """Add resource to OpenViking (only supports resources scope).
@@ -528,6 +529,7 @@ class ResourceService:
                 build_index=build_index,
                 summarize=summarize,
                 stage_callback=stage_callback,
+                progress_callback=progress_callback,
                 allow_local_path_resolution=allow_local_path_resolution,
                 **kwargs,
             )

@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: AGPL-3.0
 """Resource endpoints for OpenViking HTTP Server."""
 
-from typing import Any, Optional
+import asyncio
+import json
+from typing import Any, Callable, Dict, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -82,6 +84,7 @@ class AddResourceRequest(BaseModel):
     preserve_structure: Optional[bool] = None
     telemetry: TelemetryRequest = False
     watch_interval: float = 0
+    track_progress: bool = False
 
     @model_validator(mode="after")
     def check_path_or_temp_file_id(self):
@@ -233,7 +236,11 @@ async def add_resource(
     to = resolve_path_variables(request.to) if request.to else None
     parent = resolve_path_variables(request.parent) if request.parent else None
 
-    async def _add() -> dict[str, Any]:
+    async def _add(
+        *,
+        progress_callback: Optional[Callable[[Dict[str, Any]], Any]] = None,
+        stage_callback: Optional[Callable[[str], Any]] = None,
+    ) -> dict[str, Any]:
         try:
             result = await service.resources.add_resource(
                 path=path,
@@ -246,6 +253,8 @@ async def add_resource(
                 timeout=request.timeout,
                 allow_local_path_resolution=allow_local_path_resolution,
                 enforce_public_remote_targets=True,
+                stage_callback=stage_callback,
+                progress_callback=progress_callback,
                 **kwargs,
             )
         except Exception:
@@ -259,6 +268,70 @@ async def add_resource(
         finally:
             if resolved:
                 await resolved.cleanup()
+
+    if request.track_progress:
+        from openviking.service.task_tracker import get_task_tracker
+
+        task_tracker = get_task_tracker()
+        task = await task_tracker.create(
+            "add_resource",
+            resource_id=path,
+            account_id=_ctx.account_id,
+            user_id=_ctx.user.user_id,
+        )
+
+        async def _progress_callback(progress: Dict[str, Any]) -> None:
+            await task_tracker.update_stage(
+                task.task_id,
+                json.dumps(progress, ensure_ascii=False),
+                account_id=_ctx.account_id,
+                user_id=_ctx.user.user_id,
+            )
+
+        async def _stage_callback(stage: str) -> None:
+            await task_tracker.update_stage(
+                task.task_id,
+                stage,
+                account_id=_ctx.account_id,
+                user_id=_ctx.user.user_id,
+            )
+
+        async def _run_tracked() -> None:
+            try:
+                await task_tracker.start(
+                    task.task_id,
+                    account_id=_ctx.account_id,
+                    user_id=_ctx.user.user_id,
+                    stage="fetching",
+                )
+                result = await _add(
+                    progress_callback=_progress_callback,
+                    stage_callback=_stage_callback,
+                )
+                await task_tracker.complete(
+                    task.task_id,
+                    result,
+                    account_id=_ctx.account_id,
+                    user_id=_ctx.user.user_id,
+                )
+            except asyncio.CancelledError:
+                await task_tracker.fail(
+                    task.task_id,
+                    "resource ingestion cancelled",
+                    account_id=_ctx.account_id,
+                    user_id=_ctx.user.user_id,
+                )
+                raise
+            except Exception as exc:
+                await task_tracker.fail(
+                    task.task_id,
+                    str(exc),
+                    account_id=_ctx.account_id,
+                    user_id=_ctx.user.user_id,
+                )
+
+        asyncio.create_task(_run_tracked())
+        return response_from_result({"task_id": task.task_id}, telemetry=None)
 
     execution = await run_operation(
         operation="resources.add_resource",

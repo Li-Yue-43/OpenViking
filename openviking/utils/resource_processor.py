@@ -116,6 +116,7 @@ class ResourceProcessor:
         parent: Optional[str] = None,
         summarize: bool = False,
         stage_callback: Optional[Callable[[str], Any]] = None,
+        progress_callback: Optional[Callable[[Dict[str, Any]], Any]] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -162,11 +163,14 @@ class ResourceProcessor:
                     await _set_stage("fetching")
                 else:
                     await _set_stage("parsing")
+                process_kwargs = dict(kwargs)
+                if progress_callback is not None:
+                    process_kwargs["progress_callback"] = progress_callback
                 with viking_fs.bind_request_context(ctx):
                     parse_result = await media_processor.process(
                         source=path,
                         instruction=effective_instruction,
-                        **kwargs,
+                        **process_kwargs,
                     )
                 result["source_path"] = parse_result.source_path or path
                 result["meta"] = parse_result.meta

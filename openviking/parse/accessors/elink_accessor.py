@@ -8,6 +8,8 @@ Reuses lark-oapi SDK models for response deserialization so that parsing logic
 closely mirrors FeishuAccessor.
 """
 
+import asyncio
+import inspect
 import json
 import re
 import tempfile
@@ -155,6 +157,18 @@ class ElinkAccessor(DataAccessor):
 
     async def access(self, source: Union[str, Path], **kwargs) -> LocalResource:
         source_str = str(source)
+        progress_callback = kwargs.pop("progress_callback", None)
+
+        async def _report_progress(current: int, total: int, title: str = "") -> None:
+            if progress_callback is None:
+                return
+            try:
+                result = progress_callback({"current": current, "total": total, "title": title})
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                logger.debug("[ElinkAccessor] progress_callback failed", exc_info=True)
+
         try:
             doc_type, token = self._parse_elink_url(source_str)
 
@@ -171,6 +185,9 @@ class ElinkAccessor(DataAccessor):
                 root_title = doc.title
                 meta_doc_type = doc.doc_type
 
+            total_docs = len(docs)
+            await _report_progress(0, total_docs, root_title or "")
+
             # Create directory named after the root title
             safe_root_title = self._sanitize_filename(root_title)
             base_name = (
@@ -186,7 +203,9 @@ class ElinkAccessor(DataAccessor):
             temp_dir.mkdir(parents=True, exist_ok=True)
 
             doc_metas: List[Dict[str, Any]] = []
-            for doc, dir_parts in docs:
+            for idx, (doc, dir_parts) in enumerate(docs, start=1):
+                await _report_progress(idx, total_docs, doc.title)
+
                 parent_dir = temp_dir
                 for part in dir_parts:
                     parent_dir = parent_dir / part
