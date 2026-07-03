@@ -158,9 +158,12 @@ class ElinkAccessor(DataAccessor):
         try:
             doc_type, token = self._parse_elink_url(source_str)
 
+            skipped_docs: List[Dict[str, Any]] = []
             if doc_type == "wiki":
                 # Treat wiki URL as a knowledge-base space: traverse all child docx nodes.
-                docs, root_title = await self._fetch_wiki_space(token, source_str)
+                docs, root_title, skipped_docs = await self._fetch_wiki_space(
+                    token, source_str
+                )
                 meta_doc_type = "wiki"
             else:
                 doc = await self._fetch_document(source_str)
@@ -217,6 +220,7 @@ class ElinkAccessor(DataAccessor):
                 "elink_token": token,
                 "elink_title": root_title,
                 "documents": doc_metas,
+                "skipped_documents": skipped_docs,
             }
 
             return LocalResource(
@@ -379,16 +383,16 @@ class ElinkAccessor(DataAccessor):
 
     async def _fetch_wiki_space(
         self, token: str, original_url: str
-    ) -> Tuple[List[Tuple[ElinkDocument, List[str]]], str]:
+    ) -> Tuple[List[Tuple[ElinkDocument, List[str]]], str, List[Dict[str, Any]]]:
         """Fetch all docx documents under a wiki node, preserving directory structure.
 
         Returns:
-            (list of (document, relative_dir_parts), root_title)
+            (list of (document, relative_dir_parts), root_title, skipped_nodes)
         """
         root_node = await self._get_wiki_node(token)
         root_title = root_node.title or "Untitled"
-        docs = await self._collect_wiki_docs(root_node, original_url)
-        return docs, root_title
+        docs, skipped = await self._collect_wiki_docs(root_node, original_url)
+        return docs, root_title, skipped
 
     async def _get_wiki_node(self, token: str) -> Any:
         """Get a single wiki node metadata."""
@@ -431,16 +435,33 @@ class ElinkAccessor(DataAccessor):
 
     async def _collect_wiki_docs(
         self, root_node: Any, original_url: str
-    ) -> List[Tuple[ElinkDocument, List[str]]]:
+    ) -> Tuple[List[Tuple[ElinkDocument, List[str]]], List[Dict[str, Any]]]:
         """Recursively collect all docx documents under a wiki node."""
         results: List[Tuple[ElinkDocument, List[str]]] = []
+        skipped: List[Dict[str, Any]] = []
 
         async def collect(node: Any, dir_parts: List[str], is_root: bool):
             doc_type = self._WIKI_TYPE_MAP.get(node.obj_type, node.obj_type)
 
             if doc_type == "docx":
-                doc = await self._docx_node_to_document(node, original_url)
-                results.append((doc, dir_parts))
+                try:
+                    doc = await self._docx_node_to_document(node, original_url)
+                    results.append((doc, dir_parts))
+                except Exception as e:
+                    skipped.append(
+                        {
+                            "node_token": getattr(node, "node_token", ""),
+                            "obj_token": getattr(node, "obj_token", ""),
+                            "title": getattr(node, "title", ""),
+                            "error": str(e),
+                        }
+                    )
+                    logger.warning(
+                        f"[ElinkAccessor] Skip wiki node {getattr(node, 'node_token', '')} "
+                        f"(obj_token={getattr(node, 'obj_token', '')}, "
+                        f"title={getattr(node, 'title', '')}): {e}",
+                        exc_info=True,
+                    )
             else:
                 logger.debug(
                     f"[ElinkAccessor] Skipping wiki node {node.node_token} "
@@ -457,7 +478,8 @@ class ElinkAccessor(DataAccessor):
                 except Exception as e:
                     logger.warning(
                         f"[ElinkAccessor] Failed to list children of wiki node "
-                        f"{node.node_token}: {e}"
+                        f"{node.node_token}: {e}",
+                        exc_info=True,
                     )
                     return
 
@@ -470,7 +492,7 @@ class ElinkAccessor(DataAccessor):
                     await collect(child, child_dir_parts, is_root=False)
 
         await collect(root_node, [], is_root=True)
-        return results
+        return results, skipped
 
     async def _docx_node_to_document(
         self, node: Any, original_url: str
