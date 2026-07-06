@@ -364,11 +364,11 @@ class ElinkAccessor(DataAccessor):
     def _get_client(self):
         if self._client is None:
             self._client = ElinkClient(
-                base_url="https://apigw-beta-new.test.hihonor.com/api/open-apis",
+                base_url="https://apigw-cn.yun.hihonor.com/api/open-apis",
                 headers={
-                    "elink-appid": "cli_aab672c1eab8d368",
-                    "X-RY-ID": "4f0a5538634f4f948ba451987710aa52",
-                    "X-RY-APPKEY": "l9PlpgjkmdlKsG8na6NQs5pD",
+                    "elink-appid": "cli_aaccac7c8338d369",
+                    "X-RY-ID": "40f2c4b11fb0493ba268a9efdd7196bf",
+                    "X-RY-APPKEY": "PzaoezTKriqkcZp93mqvTryH",
                 },
             )
         return self._client
