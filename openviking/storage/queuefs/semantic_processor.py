@@ -25,6 +25,11 @@ from openviking.parse.parsers.media.utils import (
     generate_video_summary,
     get_media_type,
 )
+from openviking.utils.failed_summary_persistence import (
+    delete_failed_summary_record,
+    get_failed_summary_record,
+    persist_failed_summary_for_directory,
+)
 from openviking.prompts import render_prompt
 from openviking.server.identity import RequestContext, Role
 from openviking.storage.errors import LockAcquisitionError
@@ -51,6 +56,17 @@ from openviking_cli.utils.config import get_openviking_config
 from openviking_cli.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _parent_dir_uri(uri: str) -> str:
+    """Return the parent directory URI of ``uri``."""
+    try:
+        parent = VikingURI(uri).parent
+        return parent.uri if parent is not None else uri
+    except Exception:
+        stripped = uri.rstrip("/")
+        last_slash = stripped.rfind("/")
+        return stripped[:last_slash] if last_slash > -1 else uri
 
 
 @dataclass
@@ -626,6 +642,14 @@ class SemanticProcessor(DequeueHandlerBase):
                     except Exception as e:
                         logger.warning(f"Failed to generate summary for {file_path}: {e}")
                         file_summaries[idx] = {"name": file_name, "summary": ""}
+                        dir_uri = _parent_dir_uri(file_path)
+                        # Preserve any existing, more detailed failure record.
+                        existing = get_failed_summary_record(dir_uri)
+                        if existing is None:
+                            persist_failed_summary_for_directory(
+                                dir_uri=dir_uri,
+                                error=str(e),
+                            )
 
                 batch_size = max(1, min(self.max_concurrent_llm, 10))
                 for batch_start in range(0, len(pending_indices), batch_size):
@@ -1009,6 +1033,7 @@ class SemanticProcessor(DequeueHandlerBase):
                         async with llm_sem:
                             with bind_telemetry_stage("resource_summarize"):
                                 summary = await vlm.get_completion_async(prompt)
+                        delete_failed_summary_record(_parent_dir_uri(file_path))
                         return {"name": file_name, "summary": summary.strip()}
                 if skeleton_text is None:
                     logger.info("AST unsupported language, fallback to LLM: %s", file_path)
@@ -1023,6 +1048,7 @@ class SemanticProcessor(DequeueHandlerBase):
             async with llm_sem:
                 with bind_telemetry_stage("resource_summarize"):
                     summary = await vlm.get_completion_async(prompt)
+            delete_failed_summary_record(_parent_dir_uri(file_path))
             return {"name": file_name, "summary": summary.strip()}
 
         elif file_type == FILE_TYPE_DOCUMENTATION:
@@ -1056,6 +1082,14 @@ class SemanticProcessor(DequeueHandlerBase):
         """
         file_name = file_path.split("/")[-1]
         llm_sem = llm_sem or asyncio.Semaphore(self.max_concurrent_llm)
+
+        # Skip Elink board raw node data files; they are not meant for summarization.
+        if file_name.startswith("board_") and file_name.endswith(".json"):
+            logger.info(
+                f"[SemanticProcessor] Skipping summary for board raw data file: {file_path}"
+            )
+            return {"name": file_name, "summary": ""}
+
         media_type = get_media_type(file_name, None)
         if media_type == "image":
             return await generate_image_summary(file_path, file_name, llm_sem, ctx=ctx)

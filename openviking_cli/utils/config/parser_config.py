@@ -583,6 +583,9 @@ class SemanticConfig:
     memory_chunk_overlap: int = 200
     """Character overlap between adjacent memory chunks for context continuity."""
 
+    failed_summary_log_dir: str = "/data/openviking_log/failed_summaries"
+    """Directory where failed summary requests are persisted for later retry."""
+
 
 # Configuration registry for dynamic loading
 PARSER_CONFIG_REGISTRY = {

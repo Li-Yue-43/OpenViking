@@ -25,6 +25,11 @@ from openviking.storage.transaction import (
 from openviking.storage.viking_fs import get_viking_fs
 from openviking.telemetry import get_current_telemetry
 from openviking.utils.embedding_utils import index_resource
+from openviking.utils.failed_summary_persistence import (
+    delete_failed_summary_record,
+    persist_failed_summary_for_directory,
+    persist_failed_summary_request,
+)
 from openviking.utils.summarizer import Summarizer
 from openviking_cli.exceptions import OpenVikingError
 from openviking_cli.utils import get_logger
@@ -367,6 +372,18 @@ class ResourceProcessor:
                         )
                     except Exception:
                         pass
+            else:
+                # User chose not to generate summaries. Persist every file under
+                # the resource tree as a failed summary request so the UI can
+                # show them as pending manual retry.
+                try:
+                    await self._persist_no_summary_failed_requests(
+                        root_uri=result.get("root_uri"),
+                        temp_uri=temp_uri_for_summarize,
+                        ctx=ctx,
+                    )
+                except Exception as e:
+                    logger.warning(f"[ResourceProcessor] Failed to persist no-summary failed requests: {e}")
 
             if resource_lock.active:
                 if not should_summarize and temp_uri and not source_committed:
@@ -380,6 +397,27 @@ class ResourceProcessor:
                 result["temp_uri"] = original_temp_uri
 
             return result
+
+    async def _persist_no_summary_failed_requests(
+        self,
+        root_uri: Optional[str],
+        temp_uri: Optional[str],
+        ctx: RequestContext,
+    ) -> None:
+        """Persist the root directory as a failed summary request.
+
+        Called when ``summarize=False`` and ``build_index=False``. The root
+        directory itself is recorded; individual files are no longer iterated.
+        """
+        if not root_uri:
+            logger.warning("[ResourceProcessor] No root_uri, cannot persist no-summary requests")
+            return
+
+        persist_failed_summary_for_directory(
+            dir_uri=root_uri,
+            error="摘要生成被用户跳过（未生成摘要）",
+        )
+        logger.info(f"[ResourceProcessor] Persisted no-summary request for {root_uri}")
 
     async def reserve_unique_candidate(
         self,

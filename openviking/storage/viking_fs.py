@@ -44,6 +44,10 @@ from openviking.server.error_mapping import is_not_found_error, map_exception
 from openviking.server.identity import RequestContext, Role
 from openviking.storage.expr import PathScope
 from openviking.telemetry import get_current_telemetry
+from openviking.utils.failed_summary_persistence import (
+    delete_failed_summary_under,
+    move_failed_summary_record,
+)
 from openviking.utils.time_utils import format_simplified, get_current_timestamp, parse_iso_datetime
 from openviking_cli.exceptions import (
     FailedPreconditionError,
@@ -553,6 +557,11 @@ class VikingFS:
                     result["estimated_deleted_count"] = estimated_count
                 else:
                     result = {"estimated_deleted_count": estimated_count}
+                # Clean up per-directory failed summary records for the removed subtree.
+                try:
+                    delete_failed_summary_under(target_uri)
+                except Exception:
+                    pass
                 return result
         except LockAcquisitionError:
             raise ResourceBusyError(f"Resource is being processed: {uri}", uri=uri)
@@ -675,6 +684,11 @@ class VikingFS:
 
             # Delete source
             await self._async_agfs.rm(old_path, recursive=is_dir)
+            # Move per-directory failed summary records after a successful mv.
+            try:
+                move_failed_summary_record(old_uri, new_uri)
+            except Exception:
+                pass
             return {}
 
     async def _copy_for_mv(

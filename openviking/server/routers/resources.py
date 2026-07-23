@@ -51,6 +51,10 @@ class AddResourceRequest(BaseModel):
         exclude: Glob pattern for files to exclude during parsing.
         directly_upload_media: Whether to directly upload media files. Default is True.
         preserve_structure: Whether to preserve directory structure when adding directories.
+        summarize: Whether to generate summaries (abstract/overview) for the resource.
+            Default is True.
+        build_index: Whether to build vector index for the resource.
+            Default is True.
         watch_interval: Watch interval in minutes for automatic resource monitoring.
             - watch_interval > 0: Creates or updates a watch task. The resource will be
               automatically re-processed at the specified interval.
@@ -82,6 +86,8 @@ class AddResourceRequest(BaseModel):
     exclude: Optional[str] = None
     directly_upload_media: bool = True
     preserve_structure: Optional[bool] = None
+    summarize: bool = True
+    build_index: bool = True
     telemetry: TelemetryRequest = False
     watch_interval: float = 0
     track_progress: bool = False
@@ -228,6 +234,8 @@ async def add_resource(
         "directly_upload_media": request.directly_upload_media,
         "watch_interval": request.watch_interval,
         "create_parent": request.create_parent,
+        "summarize": request.summarize,
+        "build_index": request.build_index,
     }
     if request.preserve_structure is not None:
         kwargs["preserve_structure"] = request.preserve_structure

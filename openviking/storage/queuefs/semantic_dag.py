@@ -8,6 +8,11 @@ from weakref import WeakKeyDictionary
 from dataclasses import dataclass, field
 from typing import ClassVar, Dict, List, Optional, Set
 
+from openviking.utils.failed_summary_persistence import (
+    delete_failed_summary_record,
+    get_failed_summary_record,
+    persist_failed_summary_for_directory,
+)
 from openviking.server.identity import RequestContext
 from openviking.storage.queuefs.semantic_sidecar import write_semantic_sidecars
 from openviking.storage.transaction import NO_LOCK, LockLease
@@ -17,6 +22,18 @@ from openviking_cli.utils import VikingURI
 from openviking_cli.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _parent_dir_uri(uri: str) -> str:
+    """Return the parent directory URI of ``uri``."""
+    try:
+        parent = VikingURI(uri).parent
+        return parent.uri if parent is not None else uri
+    except Exception:
+        stripped = uri.rstrip("/")
+        last_slash = stripped.rfind("/")
+        return stripped[:last_slash] if last_slash > -1 else uri
+
 
 # Session-internal files that should never be summarized by the semantic pipeline.
 # These are canonical archives (e.g. session transcripts) whose content provides
@@ -674,6 +691,14 @@ class SemanticDagExecutor:
         except Exception as e:
             logger.warning(f"Failed to generate summary for {file_path}: {e}")
             summary_dict = {"name": file_name, "summary": ""}
+            dir_uri = _parent_dir_uri(file_path)
+            # Preserve any existing, more detailed failure record.
+            existing = get_failed_summary_record(dir_uri)
+            if existing is None:
+                persist_failed_summary_for_directory(
+                    dir_uri=dir_uri,
+                    error=str(e),
+                )
         finally:
             self._stats.done_nodes += 1
             self._stats.in_progress_nodes = max(0, self._stats.in_progress_nodes - 1)
@@ -820,6 +845,15 @@ class SemanticDagExecutor:
                 wrote = await self._write_directory_semantics(dir_uri, overview, abstract)
                 if not wrote:
                     need_vectorize = False
+                else:
+                    # Directory semantics generated successfully; clean up any
+                    # persisted failed summary record for this directory.
+                    try:
+                        delete_failed_summary_record(dir_uri)
+                    except Exception as cleanup_err:
+                        logger.warning(
+                            f"[SemanticDag] Failed to clean up failed summary record for {dir_uri}: {cleanup_err}"
+                        )
             except Exception:
                 logger.info(f"[SemanticDag] {dir_uri} write failed, skipping")
 
