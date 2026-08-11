@@ -1214,6 +1214,11 @@ class SemanticProcessor(DequeueHandlerBase):
 
         if not vlm.is_available():
             logger.warning("VLM not available, using default overview")
+            error_msg = "VLM not available, using default overview"
+            persist_failed_summary_for_directory(
+                dir_uri=dir_uri,
+                error=error_msg,
+            )
             return f"# {dir_uri.split('/')[-1]}\n\n[Directory overview is not ready]"
 
         from openviking.session.memory.utils.language import resolve_output_language
@@ -1336,6 +1341,10 @@ class SemanticProcessor(DequeueHandlerBase):
                 f"Failed to generate overview for {dir_uri}: {e}",
                 exc_info=True,
             )
+            persist_failed_summary_for_directory(
+                dir_uri=dir_uri,
+                error=str(e),
+            )
             return f"# {dir_uri.split('/')[-1]}\n\n[Directory overview is not generated]"
 
     async def _batched_generate_overview(
@@ -1428,6 +1437,10 @@ class SemanticProcessor(DequeueHandlerBase):
         partial_overviews = [p for p in partial_overviews if p is not None]
 
         if not partial_overviews:
+            persist_failed_summary_for_directory(
+                dir_uri=dir_uri,
+                error="All batches failed to generate overview",
+            )
             return f"# {dir_name}\n\n[Directory overview is not generated]"
 
         # If only one batch succeeded, use it directly
