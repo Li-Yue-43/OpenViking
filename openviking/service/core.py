@@ -420,6 +420,7 @@ class OpenVikingService:
         uri: str,
         mode: str = "vectors_only",
         wait: bool = True,
+        recursive: bool = True,
         ctx: RequestContext | None = None,
     ) -> dict[str, Any]:
         """Reindex semantic/vector artifacts for a URI."""
@@ -433,6 +434,7 @@ class OpenVikingService:
             uri=uri,
             mode=mode,
             wait=wait,
+            recursive=recursive,
             ctx=effective_ctx,
         )
 

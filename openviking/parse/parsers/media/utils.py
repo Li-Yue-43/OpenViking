@@ -186,14 +186,7 @@ async def generate_image_summary(
             f"[MediaUtils.generate_image_summary] Failed to generate image summary: {e}",
             exc_info=True,
         )
-        image_dir = _parent_dir_uri(image_uri)
-        # Avoid overwriting an existing failed record with a less informative error.
-        existing = get_failed_summary_record(image_dir)
-        if existing is None:
-            persist_failed_summary_for_directory(
-                dir_uri=image_dir,
-                error=str(e),
-            )
+        # 文件失败记录已移至 semantic_dag.py 的 DirNode 机制中统一处理
         return {"name": file_name, "summary": "Image summary generation failed"}
 
 

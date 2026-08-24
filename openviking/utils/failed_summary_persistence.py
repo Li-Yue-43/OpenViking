@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: AGPL-3.0
 """Shared utilities for persisting failed summary requests to disk."""
 
+import fcntl
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -14,7 +16,7 @@ logger = get_logger(__name__)
 
 _RESOURCES_PREFIX = "viking://resources/"
 _SCHEME_PREFIX = "viking://"
-_FAILED_FILENAME = "failed.json"
+_FAILED_JSON_FILENAME = "failed_summaries.json"
 
 
 def get_failed_summary_log_dir() -> Path:
@@ -26,62 +28,128 @@ def get_failed_summary_log_dir() -> Path:
         return Path("/data/openviking_log/failed_summaries")
 
 
-def _dir_uri_to_relative_path(dir_uri: str) -> str:
-    """Convert a directory URI to the relative path under the log directory."""
-    if dir_uri.startswith(_RESOURCES_PREFIX):
-        return dir_uri[len(_RESOURCES_PREFIX):].strip("/")
-    if dir_uri.startswith(_SCHEME_PREFIX):
-        return dir_uri[len(_SCHEME_PREFIX):].strip("/")
-    return dir_uri.strip("/")
-
-
-def _failed_json_path(dir_uri: str) -> Path:
-    """Return the path to the failed.json record for a directory URI."""
+def _get_failed_json_path() -> Path:
+    """Return the path to the centralized failed summaries JSON file."""
     base_dir = get_failed_summary_log_dir()
-    rel = _dir_uri_to_relative_path(dir_uri)
-    return base_dir / rel / _FAILED_FILENAME
+    base_dir.mkdir(parents=True, exist_ok=True)
+    return base_dir / _FAILED_JSON_FILENAME
 
 
-def _cleanup_empty_dirs(path: Path, stop_at: Path) -> None:
-    """Remove empty parent directories up to (but not including) stop_at."""
-    try:
-        current = path.parent
-        while current != stop_at and current.is_relative_to(stop_at):
-            try:
-                # Only remove empty directories; rmdir raises if not empty.
-                current.rmdir()
-            except OSError:
-                break
-            current = current.parent
-    except Exception:
-        pass
+def _acquire_lock(fd, exclusive=True):
+    """Acquire file lock."""
+    if exclusive:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    else:
+        fcntl.flock(fd, fcntl.LOCK_SH)
+
+
+def _release_lock(fd):
+    """Release file lock."""
+    fcntl.flock(fd, fcntl.LOCK_UN)
 
 
 def persist_failed_summary_for_directory(
     dir_uri: str,
     error: str,
+    recursive: bool = False,
 ) -> None:
-    """Persist a failed summary request for a directory to disk.
+    """Persist a failed summary request for a directory to the centralized JSON file.
 
-    The record is stored at ``<log_dir>/<relative_path>/failed.json``.
-    The relative path is derived from ``dir_uri`` by stripping the
-    ``viking://resources/`` prefix, or the ``viking://`` prefix if the URI
-    does not point into the resources scope.
+    The record is stored in a single JSON file at ``<log_dir>/failed_summaries.json``.
+    Uses fcntl file locking for concurrency safety.
     """
     try:
-        failed_json = _failed_json_path(dir_uri)
-        failed_json.parent.mkdir(parents=True, exist_ok=True)
-        record = {
-            "dir_uri": dir_uri,
-            "error": error,
-            "failed_at": datetime.now().isoformat(),
-        }
-        failed_json.write_text(
-            json.dumps(record, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        json_path = _get_failed_json_path()
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+
+        fd = os.open(str(json_path), os.O_RDWR | os.O_CREAT)
+        try:
+            _acquire_lock(fd, exclusive=True)
+
+            with os.fdopen(fd, 'r+', encoding='utf-8') as f:
+                try:
+                    data = json.load(f)
+                except json.JSONDecodeError:
+                    data = {"records": {}}
+
+                data["records"][dir_uri] = {
+                    "dir_uri": dir_uri,
+                    "error": error,
+                    "failed_at": datetime.now().isoformat(),
+                    "recursive": recursive,
+                }
+
+                f.seek(0)
+                f.truncate()
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        finally:
+            _release_lock(fd)
     except Exception as e:
-        logger.error(f"[FailedSummaryPersistence] Failed to persist failed summary request: {e}")
+        logger.error(f"[FailedSummaryPersistence] Failed to persist: {e}")
+
+
+def delete_failed_summary_record(dir_uri: str) -> bool:
+    """Delete a failed summary record from the centralized JSON file.
+
+    Returns True if a record was deleted.
+    """
+    try:
+        json_path = _get_failed_json_path()
+        if not json_path.exists():
+            return False
+
+        fd = os.open(str(json_path), os.O_RDWR)
+        try:
+            _acquire_lock(fd, exclusive=True)
+
+            with os.fdopen(fd, 'r+', encoding='utf-8') as f:
+                try:
+                    data = json.load(f)
+                except json.JSONDecodeError:
+                    return False
+
+                if dir_uri not in data.get("records", {}):
+                    return False
+
+                del data["records"][dir_uri]
+
+                f.seek(0)
+                f.truncate()
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        finally:
+            _release_lock(fd)
+
+        return True
+    except Exception as e:
+        logger.error(f"[FailedSummaryPersistence] Failed to delete: {e}")
+        return False
+
+
+def get_failed_summary_record(dir_uri: str) -> Optional[Dict[str, Any]]:
+    """Read a failed summary record from the centralized JSON file.
+
+    Returns None if the record does not exist or cannot be parsed.
+    """
+    try:
+        json_path = _get_failed_json_path()
+        if not json_path.exists():
+            return None
+
+        fd = os.open(str(json_path), os.O_RDONLY)
+        try:
+            _acquire_lock(fd, exclusive=False)
+
+            with os.fdopen(fd, 'r', encoding='utf-8') as f:
+                try:
+                    data = json.load(f)
+                except json.JSONDecodeError:
+                    return None
+
+                return data.get("records", {}).get(dir_uri)
+        finally:
+            _release_lock(fd)
+    except Exception:
+        return None
 
 
 # Backwards-compatible wrapper: older callers still pass a file URI plus
@@ -113,49 +181,25 @@ def persist_failed_summary_request(
     persist_failed_summary_for_directory(dir_uri=dir_uri, error=error)
 
 
-def delete_failed_summary_record(dir_uri: str) -> bool:
-    """Delete the persisted failed summary record for the given directory URI.
-
-    After deleting the record, empty parent directories are cleaned up up to
-    the log root.
-
-    Returns True if a record was deleted.
-    """
-    try:
-        failed_json = _failed_json_path(dir_uri)
-        if not failed_json.exists():
-            return False
-        failed_json.unlink()
-        _cleanup_empty_dirs(failed_json, get_failed_summary_log_dir())
-        return True
-    except Exception as e:
-        logger.error(f"[FailedSummaryPersistence] Failed to delete failed summary record: {e}")
-        return False
-
-
 def move_failed_summary_record(from_dir_uri: str, to_dir_uri: str) -> bool:
     """Move a failed summary record from one directory URI to another.
 
     Returns True if a record was moved.
     """
     try:
-        src = _failed_json_path(from_dir_uri)
-        if not src.exists():
+        record = get_failed_summary_record(from_dir_uri)
+        if record is None:
             return False
-        dst = _failed_json_path(to_dir_uri)
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        # Update the stored dir_uri to reflect the new location.
-        try:
-            data = json.loads(src.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-        data["dir_uri"] = to_dir_uri
-        dst.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        src.unlink()
-        _cleanup_empty_dirs(src, get_failed_summary_log_dir())
+
+        persist_failed_summary_for_directory(
+            dir_uri=to_dir_uri,
+            error=record.get("error", ""),
+            recursive=record.get("recursive", False),
+        )
+        delete_failed_summary_record(from_dir_uri)
         return True
     except Exception as e:
-        logger.error(f"[FailedSummaryPersistence] Failed to move failed summary record: {e}")
+        logger.error(f"[FailedSummaryPersistence] Failed to move: {e}")
         return False
 
 
@@ -165,44 +209,40 @@ def delete_failed_summary_under(dir_uri: str) -> int:
     Returns the number of records deleted.
     """
     try:
-        base_dir = get_failed_summary_log_dir()
-        rel = _dir_uri_to_relative_path(dir_uri)
-        root = base_dir / rel
-        if not root.exists():
+        json_path = _get_failed_json_path()
+        if not json_path.exists():
             return 0
-        count = 0
-        for failed_json in root.rglob(_FAILED_FILENAME):
-            try:
-                failed_json.unlink()
-                count += 1
-            except Exception:
-                continue
-        # Clean up empty directories that were left behind.
-        for subdir in sorted(root.rglob("*"), reverse=True):
-            if subdir.is_dir():
-                try:
-                    subdir.rmdir()
-                except OSError:
-                    pass
+
+        fd = os.open(str(json_path), os.O_RDWR)
         try:
-            root.rmdir()
-        except OSError:
-            pass
-        return count
+            _acquire_lock(fd, exclusive=True)
+
+            with os.fdopen(fd, 'r+', encoding='utf-8') as f:
+                try:
+                    data = json.load(f)
+                except json.JSONDecodeError:
+                    return 0
+
+                records = data.get("records", {})
+                prefix = dir_uri.rstrip("/") + "/"
+                to_delete = [
+                    uri for uri in records.keys()
+                    if uri == dir_uri or uri.startswith(prefix)
+                ]
+
+                count = 0
+                for uri in to_delete:
+                    del records[uri]
+                    count += 1
+
+                if count > 0:
+                    f.seek(0)
+                    f.truncate()
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+
+                return count
+        finally:
+            _release_lock(fd)
     except Exception as e:
-        logger.error(f"[FailedSummaryPersistence] Failed to delete failed summary records under directory: {e}")
+        logger.error(f"[FailedSummaryPersistence] Failed to delete under directory: {e}")
         return 0
-
-
-def get_failed_summary_record(dir_uri: str) -> Optional[Dict[str, Any]]:
-    """Read the failed summary record for ``dir_uri``.
-
-    Returns None if the record does not exist or cannot be parsed.
-    """
-    try:
-        failed_json = _failed_json_path(dir_uri)
-        if not failed_json.exists():
-            return None
-        return json.loads(failed_json.read_text(encoding="utf-8"))
-    except Exception:
-        return None

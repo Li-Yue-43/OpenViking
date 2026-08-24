@@ -56,6 +56,8 @@ class DirNode:
     dispatched: bool = False
     overview_scheduled: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # 新增：标记该目录下是否有文件总结失败
+    has_failed_files: bool = False
 
 
 @dataclass
@@ -691,14 +693,10 @@ class SemanticDagExecutor:
         except Exception as e:
             logger.warning(f"Failed to generate summary for {file_path}: {e}")
             summary_dict = {"name": file_name, "summary": ""}
-            dir_uri = _parent_dir_uri(file_path)
-            # Preserve any existing, more detailed failure record.
-            existing = get_failed_summary_record(dir_uri)
-            if existing is None:
-                persist_failed_summary_for_directory(
-                    dir_uri=dir_uri,
-                    error=str(e),
-                )
+            # 标记 DirNode 有文件失败
+            node = self._nodes.get(parent_uri)
+            if node:
+                node.has_failed_files = True
         finally:
             self._stats.done_nodes += 1
             self._stats.in_progress_nodes = max(0, self._stats.in_progress_nodes - 1)
@@ -735,7 +733,15 @@ class SemanticDagExecutor:
                 node.file_summaries[idx] = summary_dict
             node.pending -= 1
             if node.pending == 0 and not node.overview_scheduled:
-                self._schedule_overview(parent_uri)
+                # 如果有文件失败，记录失败任务，不调度 overview
+                if node.has_failed_files:
+                    persist_failed_summary_for_directory(
+                        dir_uri=parent_uri,
+                        error="Directory has failed file summaries",
+                        recursive=False,
+                    )
+                else:
+                    self._schedule_overview(parent_uri)
 
     async def _on_child_done(self, parent_uri: str, child_uri: str, abstract: str) -> None:
         node = self._nodes.get(parent_uri)
@@ -749,7 +755,16 @@ class SemanticDagExecutor:
                 node.children_abstracts[idx] = {"name": child_name, "abstract": abstract}
             node.pending -= 1
             if node.pending == 0 and not node.overview_scheduled:
-                self._schedule_overview(parent_uri)
+                # 子目录失败不记录，子目录自己会记录
+                # 如果当前目录有文件失败，记录失败任务
+                if node.has_failed_files:
+                    persist_failed_summary_for_directory(
+                        dir_uri=parent_uri,
+                        error="Directory has failed file summaries",
+                        recursive=False,
+                    )
+                else:
+                    self._schedule_overview(parent_uri)
 
     def _schedule_overview(self, dir_uri: str) -> None:
         node = self._nodes.get(dir_uri)
@@ -846,14 +861,9 @@ class SemanticDagExecutor:
                 if not wrote:
                     need_vectorize = False
                 else:
-                    # Directory semantics generated successfully; clean up any
-                    # persisted failed summary record for this directory.
-                    try:
-                        delete_failed_summary_record(dir_uri)
-                    except Exception as cleanup_err:
-                        logger.warning(
-                            f"[SemanticDag] Failed to clean up failed summary record for {dir_uri}: {cleanup_err}"
-                        )
+                    # Directory semantics generated successfully.
+                    # 失败记录不在此处删除，由调用方（如 reindex）在任务下发后删除
+                    pass
             except Exception:
                 logger.info(f"[SemanticDag] {dir_uri} write failed, skipping")
 
@@ -874,6 +884,12 @@ class SemanticDagExecutor:
 
         except Exception as e:
             logger.error(f"Failed to generate overview for {dir_uri}: {e}", exc_info=True)
+            # 目录 overview 失败，记录失败任务
+            persist_failed_summary_for_directory(
+                dir_uri=dir_uri,
+                error=f"Overview generation failed: {e}",
+                recursive=False,
+            )
         finally:
             self._stats.done_nodes += 1
             self._stats.in_progress_nodes = max(0, self._stats.in_progress_nodes - 1)

@@ -46,6 +46,7 @@ class ReindexRequest(BaseModel):
     uri: str
     mode: str = "vectors_only"
     wait: bool = True
+    recursive: bool = True
 
 
 router = APIRouter(prefix="/api/v1/content", tags=["content"])
@@ -211,6 +212,7 @@ async def reindex(
         uri=uri,
         mode=body.mode,
         wait=body.wait,
+        recursive=body.recursive,
         ctx=ctx,
     )
     return Response(status="ok", result=result)

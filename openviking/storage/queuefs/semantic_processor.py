@@ -642,14 +642,7 @@ class SemanticProcessor(DequeueHandlerBase):
                     except Exception as e:
                         logger.warning(f"Failed to generate summary for {file_path}: {e}")
                         file_summaries[idx] = {"name": file_name, "summary": ""}
-                        dir_uri = _parent_dir_uri(file_path)
-                        # Preserve any existing, more detailed failure record.
-                        existing = get_failed_summary_record(dir_uri)
-                        if existing is None:
-                            persist_failed_summary_for_directory(
-                                dir_uri=dir_uri,
-                                error=str(e),
-                            )
+                        # 文件失败记录已移至 semantic_dag.py 的 DirNode 机制中统一处理
 
                 batch_size = max(1, min(self.max_concurrent_llm, 10))
                 for batch_start in range(0, len(pending_indices), batch_size):
@@ -1214,11 +1207,7 @@ class SemanticProcessor(DequeueHandlerBase):
 
         if not vlm.is_available():
             logger.warning("VLM not available, using default overview")
-            error_msg = "VLM not available, using default overview"
-            persist_failed_summary_for_directory(
-                dir_uri=dir_uri,
-                error=error_msg,
-            )
+            # 目录失败记录已移至 semantic_dag.py 的 _overview_task 中统一处理
             return f"# {dir_uri.split('/')[-1]}\n\n[Directory overview is not ready]"
 
         from openviking.session.memory.utils.language import resolve_output_language
@@ -1341,10 +1330,7 @@ class SemanticProcessor(DequeueHandlerBase):
                 f"Failed to generate overview for {dir_uri}: {e}",
                 exc_info=True,
             )
-            persist_failed_summary_for_directory(
-                dir_uri=dir_uri,
-                error=str(e),
-            )
+            # 目录失败记录已移至 semantic_dag.py 的 _overview_task 中统一处理
             return f"# {dir_uri.split('/')[-1]}\n\n[Directory overview is not generated]"
 
     async def _batched_generate_overview(
@@ -1437,10 +1423,7 @@ class SemanticProcessor(DequeueHandlerBase):
         partial_overviews = [p for p in partial_overviews if p is not None]
 
         if not partial_overviews:
-            persist_failed_summary_for_directory(
-                dir_uri=dir_uri,
-                error="All batches failed to generate overview",
-            )
+            # 目录失败记录已移至 semantic_dag.py 的 _overview_task 中统一处理
             return f"# {dir_name}\n\n[Directory overview is not generated]"
 
         # If only one batch succeeded, use it directly

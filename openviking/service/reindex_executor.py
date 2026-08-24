@@ -93,6 +93,7 @@ class ReindexExecutor:
         uri: str,
         mode: str,
         wait: bool,
+        recursive: bool = True,
         ctx: RequestContext,
     ) -> dict[str, Any]:
         object_type = self._infer_target_type(uri)
@@ -115,6 +116,7 @@ class ReindexExecutor:
                 uri=uri,
                 object_type=object_type,
                 mode=mode,
+                recursive=recursive,
                 ctx=ctx,
             )
 
@@ -137,6 +139,7 @@ class ReindexExecutor:
                 uri=uri,
                 object_type=object_type,
                 mode=mode,
+                recursive=recursive,
                 ctx=ctx,
             )
         )
@@ -338,6 +341,7 @@ class ReindexExecutor:
         uri: str,
         object_type: str,
         mode: str,
+        recursive: bool = True,
         ctx: RequestContext,
     ) -> dict[str, Any]:
         service = get_service()
@@ -393,6 +397,7 @@ class ReindexExecutor:
                     await self._reindex_resource(
                         uri=uri,
                         mode=mode,
+                        recursive=recursive,
                         run=run,
                     )
                 elif object_type == "skill":
@@ -444,6 +449,7 @@ class ReindexExecutor:
         uri: str,
         object_type: str,
         mode: str,
+        recursive: bool = True,
         ctx: RequestContext,
     ) -> None:
         tracker = get_task_tracker()
@@ -453,6 +459,7 @@ class ReindexExecutor:
                 uri=uri,
                 object_type=object_type,
                 mode=mode,
+                recursive=recursive,
                 ctx=ctx,
             )
             await tracker.complete(
@@ -474,20 +481,52 @@ class ReindexExecutor:
         *,
         uri: str,
         mode: str,
+        recursive: bool = True,
         run: _ReindexRunContext,
     ) -> None:
         counters = run.counters
         ctx = run.ctx
         if mode == "semantic_and_vectors":
+            # 检查并删除失败摘要记录
+            await self._check_and_delete_failed_summary(uri, recursive)
+
             await self._run_semantic_processor(
                 uri=uri,
                 context_type="resource",
                 ctx=ctx,
                 lock=run.lock,
+                recursive=recursive,
             )
             await self._reindex_resource_vectors(uri=uri, counters=counters, ctx=ctx)
             return
         await self._reindex_resource_vectors(uri=uri, counters=counters, ctx=ctx)
+
+    async def _check_and_delete_failed_summary(self, uri: str, recursive: bool) -> None:
+        """检查并删除失败摘要记录。
+
+        如果 failed_summaries.json 中存在该目录的记录，且 recursive 参数一致，
+        则删除该记录。这样 DAG 执行器会重新生成失败记录。
+        """
+        try:
+            from openviking.utils.failed_summary_persistence import (
+                get_failed_summary_record,
+                delete_failed_summary_record,
+            )
+
+            record = get_failed_summary_record(uri)
+            if record is None:
+                return
+
+            # 检查 recursive 参数是否一致
+            record_recursive = record.get("recursive", False)
+            if record_recursive == recursive:
+                delete_failed_summary_record(uri)
+                logger.info(f"[Reindex] 删除失败摘要记录: {uri} (recursive={recursive})")
+            else:
+                logger.info(f"[Reindex] recursive 参数不一致，保留失败摘要记录: {uri} "
+                           f"(请求={recursive}, 记录={record_recursive})")
+        except Exception as e:
+            logger.warning(f"[Reindex] 检查并删除失败摘要记录失败: {e}")
 
     async def _reindex_skill(
         self,
@@ -529,12 +568,13 @@ class ReindexExecutor:
         context_type: str,
         ctx: RequestContext,
         lock: LockLease = NO_LOCK,
+        recursive: bool = True,
     ) -> None:
         processor = SemanticProcessor()
         msg = SemanticMsg(
             uri=uri,
             context_type=context_type,
-            recursive=True,
+            recursive=recursive,
             account_id=ctx.account_id,
             user_id=ctx.user.user_id,
             agent_id=ctx.user.agent_id,

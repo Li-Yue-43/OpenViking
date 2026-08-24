@@ -416,6 +416,7 @@ class ResourceProcessor:
         persist_failed_summary_for_directory(
             dir_uri=root_uri,
             error="摘要生成被用户跳过（未生成摘要）",
+            recursive=True,
         )
         logger.info(f"[ResourceProcessor] Persisted no-summary request for {root_uri}")
 
