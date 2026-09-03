@@ -48,6 +48,26 @@ def _release_lock(fd):
     fcntl.flock(fd, fcntl.LOCK_UN)
 
 
+def _is_descendant_or_same(parent_uri: str, child_uri: str) -> bool:
+    """Return True if ``child_uri`` is ``parent_uri`` or one of its descendants."""
+    parent = parent_uri.rstrip("/")
+    child = child_uri.rstrip("/")
+    if child == parent:
+        return True
+    prefix = parent + "/"
+    return child.startswith(prefix)
+
+
+def _is_strict_ancestor(child_uri: str, parent_uri: str) -> bool:
+    """Return True if ``parent_uri`` is a strict ancestor of ``child_uri``."""
+    parent = parent_uri.rstrip("/")
+    child = child_uri.rstrip("/")
+    if child == parent:
+        return False
+    prefix = parent + "/"
+    return child.startswith(prefix)
+
+
 def persist_failed_summary_for_directory(
     dir_uri: str,
     error: str,
@@ -57,10 +77,24 @@ def persist_failed_summary_for_directory(
 
     The record is stored in a single JSON file at ``<log_dir>/failed_summaries.json``.
     Uses fcntl file locking for concurrency safety.
+
+    Persistence rules:
+
+    1. If ``recursive`` is True, the record is always persisted.
+    2. If ``recursive`` is False, existing records are inspected:
+       - If an existing record is a descendant of ``dir_uri``, do not persist
+         ``dir_uri``; the descendant record already covers the failure and will
+         re-trigger its parent refresh when retried.
+       - If an existing record is an ancestor of ``dir_uri`` and was itself
+         persisted with ``recursive=False``, remove that ancestor record so the
+         more specific ``dir_uri`` failure is tracked instead.
     """
     try:
         json_path = _get_failed_json_path()
         json_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # 规范化 dir_uri：移除尾部斜杠，确保后续查询/删除时 key 一致
+        normalized_dir_uri = dir_uri.rstrip("/")
 
         fd = os.open(str(json_path), os.O_RDWR | os.O_CREAT)
         try:
@@ -72,24 +106,68 @@ def persist_failed_summary_for_directory(
                 except json.JSONDecodeError:
                     data = {"records": {}}
 
-                data["records"][dir_uri] = {
-                    "dir_uri": dir_uri,
+                records = data.get("records", {})
+
+                if not recursive:
+                    should_persist = True
+                    uris_to_remove = []
+                    for existing_uri, existing_record in records.items():
+                        if _is_descendant_or_same(normalized_dir_uri, existing_uri):
+                            # 已有相同目录或子目录失败记录，无需再落盘
+                            should_persist = False
+                            break
+                        if _is_strict_ancestor(normalized_dir_uri, existing_uri):
+                            # 已有父目录记录；若其 recursive=False，则替换为更具体的子目录记录
+                            if not existing_record.get("recursive", False):
+                                uris_to_remove.append(existing_uri)
+
+                    if not should_persist:
+                        logger.info(
+                            "[FailedSummaryPersistence] Skip persisting %s: "
+                            "a descendant record already exists",
+                            normalized_dir_uri,
+                        )
+                        _release_lock(fd)
+                        return
+
+                    for uri in uris_to_remove:
+                        del records[uri]
+                        logger.info(
+                            "[FailedSummaryPersistence] Replaced parent record %s "
+                            "with more specific record %s",
+                            uri,
+                            normalized_dir_uri,
+                        )
+
+                records[normalized_dir_uri] = {
+                    "dir_uri": normalized_dir_uri,
                     "error": error,
                     "failed_at": datetime.now().isoformat(),
                     "recursive": recursive,
                 }
+                data["records"] = records
 
                 f.seek(0)
                 f.truncate()
                 json.dump(data, f, ensure_ascii=False, indent=2)
-        finally:
-            _release_lock(fd)
+                f.flush()
+                os.fsync(fd)
+
+                # 在 fd 关闭前释放锁
+                _release_lock(fd)
+        except Exception:
+            # 如果 with 块内抛异常，fd 会被 with 关闭，flock 锁会自动释放
+            raise
     except Exception as e:
         logger.error(f"[FailedSummaryPersistence] Failed to persist: {e}")
 
 
-def delete_failed_summary_record(dir_uri: str) -> bool:
+def delete_failed_summary_record(dir_uri: str, recursive: Optional[bool] = None) -> bool:
     """Delete a failed summary record from the centralized JSON file.
+
+    When ``recursive`` is provided, the record is only deleted if its stored
+    ``recursive`` value matches. This prevents accidentally removing a record
+    for the same directory that was created with a different recursive flag.
 
     Returns True if a record was deleted.
     """
@@ -97,6 +175,8 @@ def delete_failed_summary_record(dir_uri: str) -> bool:
         json_path = _get_failed_json_path()
         if not json_path.exists():
             return False
+
+        normalized_dir_uri = dir_uri.rstrip("/")
 
         fd = os.open(str(json_path), os.O_RDWR)
         try:
@@ -108,17 +188,35 @@ def delete_failed_summary_record(dir_uri: str) -> bool:
                 except json.JSONDecodeError:
                     return False
 
-                if dir_uri not in data.get("records", {}):
+                records = data.get("records", {})
+                record = records.get(normalized_dir_uri)
+                if record is None:
                     return False
 
-                del data["records"][dir_uri]
+                if recursive is not None:
+                    record_recursive = record.get("recursive", False)
+                    if record_recursive != recursive:
+                        logger.info(
+                            f"[FailedSummaryPersistence] Skip deleting {normalized_dir_uri}: "
+                            f"recursive mismatch (request={recursive}, record={record_recursive})"
+                        )
+                        return False
+
+                del records[normalized_dir_uri]
 
                 f.seek(0)
                 f.truncate()
                 json.dump(data, f, ensure_ascii=False, indent=2)
-        finally:
-            _release_lock(fd)
+                f.flush()
+                os.fsync(fd)
 
+                # 在 fd 关闭前释放锁
+                _release_lock(fd)
+        except Exception:
+            # 如果 with 块内抛异常，fd 会被 with 关闭，flock 锁会自动释放
+            raise
+
+        logger.info(f"[FailedSummaryPersistence] Deleted failed summary record: {normalized_dir_uri}")
         return True
     except Exception as e:
         logger.error(f"[FailedSummaryPersistence] Failed to delete: {e}")
@@ -135,6 +233,8 @@ def get_failed_summary_record(dir_uri: str) -> Optional[Dict[str, Any]]:
         if not json_path.exists():
             return None
 
+        normalized_dir_uri = dir_uri.rstrip("/")
+
         fd = os.open(str(json_path), os.O_RDONLY)
         try:
             _acquire_lock(fd, exclusive=False)
@@ -145,9 +245,10 @@ def get_failed_summary_record(dir_uri: str) -> Optional[Dict[str, Any]]:
                 except json.JSONDecodeError:
                     return None
 
-                return data.get("records", {}).get(dir_uri)
-        finally:
-            _release_lock(fd)
+                return data.get("records", {}).get(normalized_dir_uri)
+        except Exception:
+            # 如果 with 块内抛异常，fd 会被 with 关闭，flock 锁会自动释放
+            raise
     except Exception:
         return None
 
@@ -213,6 +314,8 @@ def delete_failed_summary_under(dir_uri: str) -> int:
         if not json_path.exists():
             return 0
 
+        normalized_dir_uri = dir_uri.rstrip("/")
+
         fd = os.open(str(json_path), os.O_RDWR)
         try:
             _acquire_lock(fd, exclusive=True)
@@ -224,10 +327,10 @@ def delete_failed_summary_under(dir_uri: str) -> int:
                     return 0
 
                 records = data.get("records", {})
-                prefix = dir_uri.rstrip("/") + "/"
+                prefix = normalized_dir_uri + "/"
                 to_delete = [
                     uri for uri in records.keys()
-                    if uri == dir_uri or uri.startswith(prefix)
+                    if uri == normalized_dir_uri or uri.startswith(prefix)
                 ]
 
                 count = 0
@@ -239,10 +342,16 @@ def delete_failed_summary_under(dir_uri: str) -> int:
                     f.seek(0)
                     f.truncate()
                     json.dump(data, f, ensure_ascii=False, indent=2)
+                    f.flush()
+                    os.fsync(fd)
 
-                return count
-        finally:
-            _release_lock(fd)
+                # 在 fd 关闭前释放锁
+                _release_lock(fd)
+        except Exception:
+            # 如果 with 块内抛异常，fd 会被 with 关闭，flock 锁会自动释放
+            raise
+
+        return count
     except Exception as e:
         logger.error(f"[FailedSummaryPersistence] Failed to delete under directory: {e}")
         return 0

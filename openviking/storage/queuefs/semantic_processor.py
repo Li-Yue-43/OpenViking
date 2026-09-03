@@ -26,10 +26,10 @@ from openviking.parse.parsers.media.utils import (
     get_media_type,
 )
 from openviking.utils.failed_summary_persistence import (
-    delete_failed_summary_record,
     get_failed_summary_record,
     persist_failed_summary_for_directory,
 )
+from openviking.utils.simulate_summary_failure import should_simulate_summary_failure
 from openviking.prompts import render_prompt
 from openviking.server.identity import RequestContext, Role
 from openviking.storage.errors import LockAcquisitionError
@@ -56,17 +56,6 @@ from openviking_cli.utils.config import get_openviking_config
 from openviking_cli.utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-
-def _parent_dir_uri(uri: str) -> str:
-    """Return the parent directory URI of ``uri``."""
-    try:
-        parent = VikingURI(uri).parent
-        return parent.uri if parent is not None else uri
-    except Exception:
-        stripped = uri.rstrip("/")
-        last_slash = stripped.rfind("/")
-        return stripped[:last_slash] if last_slash > -1 else uri
 
 
 @dataclass
@@ -970,6 +959,10 @@ class SemanticProcessor(DequeueHandlerBase):
         ctx: Optional[RequestContext] = None,
     ) -> Dict[str, str]:
         """Generate summary for a single text file (code, documentation, or other text)."""
+        simulated_error = should_simulate_summary_failure()
+        if simulated_error:
+            raise RuntimeError(simulated_error)
+
         viking_fs = get_viking_fs()
         vlm = get_openviking_config().vlm
         active_ctx = ctx or self._default_ctx
@@ -1026,7 +1019,6 @@ class SemanticProcessor(DequeueHandlerBase):
                         async with llm_sem:
                             with bind_telemetry_stage("resource_summarize"):
                                 summary = await vlm.get_completion_async(prompt)
-                        delete_failed_summary_record(_parent_dir_uri(file_path))
                         return {"name": file_name, "summary": summary.strip()}
                 if skeleton_text is None:
                     logger.info("AST unsupported language, fallback to LLM: %s", file_path)
@@ -1041,7 +1033,6 @@ class SemanticProcessor(DequeueHandlerBase):
             async with llm_sem:
                 with bind_telemetry_stage("resource_summarize"):
                     summary = await vlm.get_completion_async(prompt)
-            delete_failed_summary_record(_parent_dir_uri(file_path))
             return {"name": file_name, "summary": summary.strip()}
 
         elif file_type == FILE_TYPE_DOCUMENTATION:
@@ -1204,6 +1195,10 @@ class SemanticProcessor(DequeueHandlerBase):
         config = get_openviking_config()
         vlm = config.vlm
         semantic = config.semantic
+
+        simulated_error = should_simulate_summary_failure()
+        if simulated_error:
+            raise RuntimeError(simulated_error)
 
         if not vlm.is_available():
             logger.warning("VLM not available, using default overview")

@@ -39,6 +39,7 @@ from openviking.storage.viking_fs import get_viking_fs
 from openviking.telemetry import get_current_telemetry
 from openviking.telemetry.request_wait_tracker import get_request_wait_tracker
 from openviking.utils.embedding_utils import get_resource_content_type
+from openviking.utils.failed_summary_persistence import delete_failed_summary_record
 from openviking.utils.skill_processor import SkillProcessor
 from openviking_cli.exceptions import NotFoundError, OpenVikingError
 from openviking_cli.utils import VikingURI, get_logger
@@ -487,9 +488,6 @@ class ReindexExecutor:
         counters = run.counters
         ctx = run.ctx
         if mode == "semantic_and_vectors":
-            # 检查并删除失败摘要记录
-            await self._check_and_delete_failed_summary(uri, recursive)
-
             await self._run_semantic_processor(
                 uri=uri,
                 context_type="resource",
@@ -500,33 +498,6 @@ class ReindexExecutor:
             await self._reindex_resource_vectors(uri=uri, counters=counters, ctx=ctx)
             return
         await self._reindex_resource_vectors(uri=uri, counters=counters, ctx=ctx)
-
-    async def _check_and_delete_failed_summary(self, uri: str, recursive: bool) -> None:
-        """检查并删除失败摘要记录。
-
-        如果 failed_summaries.json 中存在该目录的记录，且 recursive 参数一致，
-        则删除该记录。这样 DAG 执行器会重新生成失败记录。
-        """
-        try:
-            from openviking.utils.failed_summary_persistence import (
-                get_failed_summary_record,
-                delete_failed_summary_record,
-            )
-
-            record = get_failed_summary_record(uri)
-            if record is None:
-                return
-
-            # 检查 recursive 参数是否一致
-            record_recursive = record.get("recursive", False)
-            if record_recursive == recursive:
-                delete_failed_summary_record(uri)
-                logger.info(f"[Reindex] 删除失败摘要记录: {uri} (recursive={recursive})")
-            else:
-                logger.info(f"[Reindex] recursive 参数不一致，保留失败摘要记录: {uri} "
-                           f"(请求={recursive}, 记录={record_recursive})")
-        except Exception as e:
-            logger.warning(f"[Reindex] 检查并删除失败摘要记录失败: {e}")
 
     async def _reindex_skill(
         self,
@@ -581,6 +552,9 @@ class ReindexExecutor:
             role=ctx.role.value,
             skip_vectorization=True,
         )
+        # 任务已提交处理（直接 dequeue），清理对应目录的旧失败摘要记录。
+        # 若实际处理失败，内核会重新落盘新的失败记录。
+        delete_failed_summary_record(uri, recursive=recursive)
         await processor.on_dequeue({"data": msg.to_json()}, lock=lock.as_borrowed())
 
     async def _reindex_resource_vectors(

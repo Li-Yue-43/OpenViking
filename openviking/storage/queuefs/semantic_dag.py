@@ -40,6 +40,18 @@ def _parent_dir_uri(uri: str) -> str:
 # no additional retrieval value and would only waste tokens and add latency.
 _SKIP_FILENAMES = frozenset({"messages.jsonl"})
 
+# Elink board raw node data files; not meant for summarization.
+# Skipping them at listing time prevents them from inflating pending counts
+# and from feeding empty summaries into the overview generator.
+def _is_skip_file(name: str) -> bool:
+    """Return True if ``name`` should be excluded from semantic processing."""
+    if name in _SKIP_FILENAMES:
+        return True
+    # board_*.json are raw node data files produced by the Elink parser.
+    if name.startswith("board_") and name.endswith(".json"):
+        return True
+    return False
+
 
 @dataclass
 class DirNode:
@@ -453,6 +465,11 @@ class SemanticDagExecutor:
             else:
                 pending = len(file_paths)
 
+            logger.info(
+                f"[SemanticDag] _dispatch_dir: dir={dir_uri}, "
+                f"children={len(children_dirs)}, files={len(file_paths)}, pending={pending}"
+            )
+
             node = DirNode(
                 uri=dir_uri,
                 children_dirs=children_dirs,
@@ -501,7 +518,7 @@ class SemanticDagExecutor:
 
         for entry in entries:
             name = entry.get("name", "")
-            if not name or name.startswith(".") or name in [".", ".."] or name in _SKIP_FILENAMES:
+            if not name or name.startswith(".") or name in [".", ".."] or _is_skip_file(name):
                 continue
 
             item_uri = VikingURI(uri).join(name).uri
@@ -672,6 +689,7 @@ class SemanticDagExecutor:
 
         file_name = file_path.split("/")[-1]
         need_vectorize = True
+        logger.info(f"[SemanticDag] _file_summary_task START: file={file_path}, parent={parent_uri}")
         try:
             summary_dict = None
             if self._incremental_update:
@@ -700,6 +718,10 @@ class SemanticDagExecutor:
         finally:
             self._stats.done_nodes += 1
             self._stats.in_progress_nodes = max(0, self._stats.in_progress_nodes - 1)
+            logger.info(
+                f"[SemanticDag] _file_summary_task END: file={file_path}, parent={parent_uri}, "
+                f"summary_len={len(summary_dict.get('summary', '')) if summary_dict else 0}"
+            )
 
         try:
             if need_vectorize:
@@ -732,6 +754,10 @@ class SemanticDagExecutor:
             if idx is not None:
                 node.file_summaries[idx] = summary_dict
             node.pending -= 1
+            logger.info(
+                f"[SemanticDag] _on_file_done: file={file_path}, parent={parent_uri}, "
+                f"pending={node.pending}, overview_scheduled={node.overview_scheduled}"
+            )
             if node.pending == 0 and not node.overview_scheduled:
                 # 如果有文件失败，记录失败任务，不调度 overview
                 if node.has_failed_files:
@@ -742,6 +768,11 @@ class SemanticDagExecutor:
                     )
                 else:
                     self._schedule_overview(parent_uri)
+
+        # 如果该目录因文件失败而直接完成（未调度 overview），需要通知父节点并释放当前节点，
+        # 否则父目录的 pending 永远到不了 0，根目录锁无法释放。
+        if node.pending == 0 and not node.overview_scheduled and node.has_failed_files:
+            await self._finish_dir_node(parent_uri, "")
 
     async def _on_child_done(self, parent_uri: str, child_uri: str, abstract: str) -> None:
         node = self._nodes.get(parent_uri)
@@ -754,6 +785,10 @@ class SemanticDagExecutor:
             if idx is not None:
                 node.children_abstracts[idx] = {"name": child_name, "abstract": abstract}
             node.pending -= 1
+            logger.info(
+                f"[SemanticDag] _on_child_done: child={child_uri}, parent={parent_uri}, "
+                f"pending={node.pending}, overview_scheduled={node.overview_scheduled}"
+            )
             if node.pending == 0 and not node.overview_scheduled:
                 # 子目录失败不记录，子目录自己会记录
                 # 如果当前目录有文件失败，记录失败任务
@@ -766,11 +801,17 @@ class SemanticDagExecutor:
                 else:
                     self._schedule_overview(parent_uri)
 
+        # 如果该目录因子目录/文件失败而直接完成（未调度 overview），需要通知父节点并释放当前节点，
+        # 否则父目录的 pending 永远到不了 0，根目录锁无法释放。
+        if node.pending == 0 and not node.overview_scheduled and node.has_failed_files:
+            await self._finish_dir_node(parent_uri, "")
+
     def _schedule_overview(self, dir_uri: str) -> None:
         node = self._nodes.get(dir_uri)
         if not node or node.overview_scheduled:
             return
         node.overview_scheduled = True
+        logger.info(f"[SemanticDag] _schedule_overview: dir={dir_uri}")
         self._schedule_work(DagWork(kind="overview", dir_uri=dir_uri))
 
     def _finalize_file_summaries(self, node: DirNode) -> List[Dict[str, str]]:
@@ -833,6 +874,7 @@ class SemanticDagExecutor:
         need_vectorize = True
         children_changed = True
         abstract = ""
+        logger.info(f"[SemanticDag] _overview_task START: dir={dir_uri}")
         try:
             overview = None
             abstract = None
@@ -848,6 +890,10 @@ class SemanticDagExecutor:
                 async with node.lock:
                     file_summaries = self._finalize_file_summaries(node)
                     children_abstracts = await self._finalize_children_abstracts(node)
+                logger.info(
+                    f"[SemanticDag] _overview_task generating: dir={dir_uri}, "
+                    f"file_summaries={len(file_summaries)}, children_abstracts={len(children_abstracts)}"
+                )
                 async with self._llm_sem:
                     overview = await self._processor._generate_overview(
                         dir_uri, file_summaries, children_abstracts
@@ -895,7 +941,17 @@ class SemanticDagExecutor:
             self._stats.in_progress_nodes = max(0, self._stats.in_progress_nodes - 1)
 
         self._dir_change_status[dir_uri] = children_changed
+        logger.info(f"[SemanticDag] _overview_task END: dir={dir_uri}, children_changed={children_changed}")
 
+        await self._finish_dir_node(dir_uri, abstract)
+
+    async def _finish_dir_node(self, dir_uri: str, abstract: str) -> None:
+        """Notify parent that ``dir_uri`` has finished and release the node.
+
+        Must be called after the directory is done, whether successfully or
+        after failures have been persisted. This prevents parent directories
+        from waiting forever on a child that already completed.
+        """
         parent_uri = self._parent.get(dir_uri)
         if parent_uri is None:
             self._release_dir_node(dir_uri)

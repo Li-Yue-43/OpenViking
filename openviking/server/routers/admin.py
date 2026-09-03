@@ -16,6 +16,12 @@ from openviking.server.dependencies import get_service
 from openviking.server.identity import AccountNamespacePolicy, RequestContext, Role
 from openviking.server.models import Response
 from openviking.storage.viking_fs import get_viking_fs
+from openviking.utils.failed_summary_persistence import (
+    delete_failed_summary_record,
+    get_failed_summary_record,
+    move_failed_summary_record,
+    persist_failed_summary_for_directory,
+)
 from openviking_cli.exceptions import InvalidArgumentError, NotFoundError, PermissionDeniedError
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils.logger import get_logger
@@ -39,6 +45,27 @@ class RegisterUserRequest(BaseModel):
 
 class SetRoleRequest(BaseModel):
     role: str
+
+
+class DeleteFailedSummaryRequest(BaseModel):
+    dir_uri: str
+    recursive: bool | None = None
+
+
+class MoveFailedSummaryRequest(BaseModel):
+    from_dir_uri: str
+    to_dir_uri: str
+
+
+class PersistFailedSummaryRequest(BaseModel):
+    dir_uri: str
+    error: str
+    recursive: bool = False
+
+
+def _normalize_dir_uri(uri: str) -> str:
+    """Normalize a directory URI by stripping trailing slashes."""
+    return uri.rstrip("/") if uri else uri
 
 
 def _get_api_key_manager(request: Request):
@@ -281,6 +308,86 @@ async def remove_user(
     manager = _get_api_key_manager(request)
     await manager.remove_user(account_id, user_id)
     return Response(status="ok", result={"deleted": True})
+
+
+# ---- Failed summary management endpoints ----
+
+
+@router.post("/failed-summaries/delete")
+@require_auth_root_or_admin
+async def delete_failed_summary(
+    body: DeleteFailedSummaryRequest,
+    request: Request,
+    ctx: RequestContext = Depends(get_request_context),
+):
+    """Delete a failed summary record by directory URI."""
+    dir_uri = _normalize_dir_uri(body.dir_uri)
+    if not dir_uri.startswith("viking://"):
+        raise InvalidArgumentError(f"Invalid directory URI: {body.dir_uri}")
+
+    record = get_failed_summary_record(dir_uri)
+    if record is None:
+        return Response(
+            status="ok",
+            result={"deleted": False, "message": "No matching failed summary record found"},
+        )
+
+    deleted = delete_failed_summary_record(dir_uri, recursive=body.recursive)
+    return Response(
+        status="ok",
+        result={"deleted": deleted, "dir_uri": dir_uri},
+    )
+
+
+@router.post("/failed-summaries/move")
+@require_auth_root_or_admin
+async def move_failed_summary(
+    body: MoveFailedSummaryRequest,
+    request: Request,
+    ctx: RequestContext = Depends(get_request_context),
+):
+    """Move a failed summary record from one directory URI to another."""
+    from_dir_uri = _normalize_dir_uri(body.from_dir_uri)
+    to_dir_uri = _normalize_dir_uri(body.to_dir_uri)
+
+    if not from_dir_uri.startswith("viking://") or not to_dir_uri.startswith("viking://"):
+        raise InvalidArgumentError("Invalid directory URI")
+
+    if from_dir_uri == to_dir_uri:
+        raise InvalidArgumentError("Source and target directory URIs must be different")
+
+    moved = move_failed_summary_record(from_dir_uri, to_dir_uri)
+    return Response(
+        status="ok",
+        result={
+            "moved": moved,
+            "from_dir_uri": from_dir_uri,
+            "to_dir_uri": to_dir_uri,
+        },
+    )
+
+
+@router.post("/failed-summaries/persist")
+@require_auth_root_or_admin
+async def persist_failed_summary(
+    body: PersistFailedSummaryRequest,
+    request: Request,
+    ctx: RequestContext = Depends(get_request_context),
+):
+    """Persist a failed summary record for a directory."""
+    dir_uri = _normalize_dir_uri(body.dir_uri)
+    if not dir_uri.startswith("viking://"):
+        raise InvalidArgumentError(f"Invalid directory URI: {body.dir_uri}")
+
+    persist_failed_summary_for_directory(
+        dir_uri=dir_uri,
+        error=body.error,
+        recursive=body.recursive,
+    )
+    return Response(
+        status="ok",
+        result={"persisted": True, "dir_uri": dir_uri},
+    )
 
 
 @router.put("/accounts/{account_id}/users/{user_id}/role")

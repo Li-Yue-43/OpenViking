@@ -10,13 +10,12 @@ from openviking.core.path_variables import CalendarVariableProvider
 from openviking.prompts import render_prompt
 from openviking.storage.viking_fs import get_viking_fs
 from openviking.utils.failed_summary_persistence import (
-    delete_failed_summary_record,
     get_failed_summary_record,
     persist_failed_summary_for_directory,
 )
+from openviking.utils.simulate_summary_failure import should_simulate_summary_failure
 from openviking_cli.utils.config import get_openviking_config
 from openviking_cli.utils.logger import get_logger
-from openviking_cli.utils.uri import VikingURI
 
 if TYPE_CHECKING:
     from openviking.server.identity import RequestContext
@@ -24,17 +23,6 @@ if TYPE_CHECKING:
 from .constants import AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 
 logger = get_logger(__name__)
-
-
-def _parent_dir_uri(uri: str) -> str:
-    """Return the parent directory URI of ``uri``."""
-    try:
-        parent = VikingURI(uri).parent
-        return parent.uri if parent is not None else uri
-    except Exception:
-        stripped = uri.rstrip("/")
-        last_slash = stripped.rfind("/")
-        return stripped[:last_slash] if last_slash > -1 else uri
 
 
 def _is_svg(data: bytes) -> bool:
@@ -136,6 +124,10 @@ async def generate_image_summary(
     vlm = get_openviking_config().vlm
     file_name = original_filename
 
+    simulated_error = should_simulate_summary_failure()
+    if simulated_error:
+        raise RuntimeError(simulated_error)
+
     try:
         # Read image bytes
         image_bytes = await viking_fs.read_file_bytes(image_uri, ctx=ctx)
@@ -170,8 +162,6 @@ async def generate_image_summary(
         logger.info(
             f"[MediaUtils.generate_image_summary] VLM response received, length: {len(response)}"
         )
-        image_dir = _parent_dir_uri(image_uri)
-        delete_failed_summary_record(image_dir)
         return {"name": file_name, "summary": response.strip()}
 
     except ValueError as e:
@@ -208,6 +198,10 @@ async def generate_audio_summary(
     Returns:
         Dictionary with "name" and "summary" keys
     """
+    simulated_error = should_simulate_summary_failure()
+    if simulated_error:
+        raise RuntimeError(simulated_error)
+
     logger.info(
         f"[MediaUtils.generate_audio_summary] Audio summary generation not yet implemented for: {audio_uri}"
     )
@@ -232,6 +226,10 @@ async def generate_video_summary(
     Returns:
         Dictionary with "name" and "summary" keys
     """
+    simulated_error = should_simulate_summary_failure()
+    if simulated_error:
+        raise RuntimeError(simulated_error)
+
     logger.info(
         f"[MediaUtils.generate_video_summary] Video summary generation not yet implemented for: {video_uri}"
     )
