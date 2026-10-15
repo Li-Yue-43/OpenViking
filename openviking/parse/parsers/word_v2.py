@@ -15,12 +15,13 @@ Enhanced: openviking.parse.parsers.word_v2.WordParserWithImages
 """
 
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 from docx.oxml.ns import qn
 
 from openviking.parse.base import ParseResult
 from openviking.parse.parsers.word import WordParser
+from openviking.parse.resource_path import ResourcePathResolver
 from openviking_cli.utils.config.parser_config import ParserConfig
 from openviking_cli.utils.logger import get_logger
 
@@ -62,13 +63,21 @@ class WordParserWithImages(WordParser):
 
             # Step 2: Parse through MarkdownParser to create temp VikingFS directory
             result = await self._md_parser.parse_content(
-                markdown_content, source_path=str(path), instruction=instruction, **kwargs
+                markdown_content,
+                source_path=str(path),
+                instruction=instruction,
+                **kwargs,
             )
 
-            # Step 3: Copy extracted images into the temp VikingFS directory
+            # Step 3: Copy extracted images into the temp VikingFS directory and
+            # rewrite resource references in all Markdown files.
             temp_dir_path = result.temp_dir_path
             if temp_dir_path and extracted_images:
                 await self._copy_images_to_vikingfs(temp_dir_path, extracted_images)
+                md_target_dir = await self._discover_md_target_dir(temp_dir_path)
+                resource_vikinguri = md_target_dir
+                await self._rewrite_md_resource_paths(temp_dir_path, resource_vikinguri)
+                result.resource_vikinguri = resource_vikinguri
 
             result.source_format = "docx"
             result.parser_name = "WordParserWithImages"
@@ -81,7 +90,54 @@ class WordParserWithImages(WordParser):
             result.parser_name = "WordParserWithImages"
             return result
 
-    def _convert_to_markdown_with_images(self, path: Path, docx):
+    async def _discover_md_target_dir(self, temp_uri: str) -> str:
+        """Discover the directory where MarkdownParser wrote .md files."""
+        viking_fs = self._get_viking_fs()
+        try:
+            listing = await viking_fs.ls(temp_uri)
+            for entry in listing:
+                if entry.get("isDir", False):
+                    subdir_uri = f"{temp_uri}/{entry['name']}"
+                    sub_listing = await viking_fs.ls(subdir_uri)
+                    has_md = any(
+                        e.get("name", "").endswith(".md") for e in sub_listing
+                    )
+                    if has_md:
+                        return subdir_uri
+                elif entry.get("name", "").endswith(".md"):
+                    return temp_uri
+        except Exception as e:
+            logger.warning(f"[WordParserWithImages] Failed to discover md dir: {e}")
+        return temp_uri
+
+    async def _rewrite_md_resource_paths(self, temp_uri: str, resource_vikinguri: str) -> None:
+        """Rewrite resource references in all Markdown files under temp_uri."""
+        viking_fs = self._get_viking_fs()
+        resolver = ResourcePathResolver(resource_vikinguri)
+
+        async def walk(uri: str) -> None:
+            try:
+                listing = await viking_fs.ls(uri)
+            except Exception:
+                return
+            for entry in listing:
+                full_uri = f"{uri}/{entry['name']}"
+                if entry.get("isDir", False):
+                    await walk(full_uri)
+                elif entry.get("name", "").endswith(".md"):
+                    try:
+                        content = await viking_fs.read_file(full_uri)
+                        rewritten = resolver.rewrite(content, uri)
+                        if rewritten != content:
+                            await viking_fs.write_file(full_uri, rewritten)
+                    except Exception as e:
+                        logger.warning(
+                            f"[WordParserWithImages] Failed to rewrite {full_uri}: {e}"
+                        )
+
+        await walk(temp_uri)
+
+    def _convert_to_markdown_with_images(self, path: Path, docx) -> Tuple[str, List[Tuple[str, bytes]]]:
         """Convert Word document to Markdown, extracting all embedded images.
 
         Returns:
@@ -152,7 +208,7 @@ class WordParserWithImages(WordParser):
                     if imgs:
                         # Add image refs for images in otherwise empty paragraphs
                         for filename, _ in imgs:
-                            markdown_parts.append(f"![{filename}]({filename})")
+                            markdown_parts.append(f"![{filename}](./images/{filename})")
                     continue
 
                 # Extract images first
@@ -170,7 +226,7 @@ class WordParserWithImages(WordParser):
 
                 # Append image references after text
                 for filename, _ in imgs:
-                    markdown_parts.append(f"![{filename}]({filename})")
+                    markdown_parts.append(f"![{filename}](./images/{filename})")
 
             elif child.tag == qn("w:tbl"):
                 if child in table_by_element:
@@ -186,45 +242,24 @@ class WordParserWithImages(WordParser):
     async def _copy_images_to_vikingfs(self, temp_uri: str, extracted_images):
         """Copy extracted images into the VikingFS temp directory.
 
-        MarkdownParser creates files under temp_uri/{doc_title}/ or its
-        subdirectories. We must save images to the same directory where
-        the .md files live so that relative image paths work.
+        Images are placed under an ``images/`` subdirectory at the same level
+        as the Markdown files (``resource_vikinguri``), and Markdown references use
+        ``./images/{filename}`` so that MarkdownParser can rewrite them when
+        splitting content into subdirectories.
         """
-        from openviking.storage.viking_fs import get_viking_fs
+        viking_fs = self._get_viking_fs()
 
-        viking_fs = get_viking_fs()
-
-        # Discover where .md files were written by listing temp_uri
-        md_target_dir = None
-        try:
-            listing = await viking_fs.ls(temp_uri)
-            for entry in listing:
-                if entry.get("isDir", False):
-                    subdir_uri = f"{temp_uri}/{entry['name']}"
-                    sub_listing = await viking_fs.ls(subdir_uri)
-                    has_md = any(
-                        e.get("name", "").endswith(".md") for e in sub_listing
-                    )
-                    if has_md:
-                        md_target_dir = subdir_uri
-                        break
-                elif entry.get("name", "").endswith(".md"):
-                    md_target_dir = temp_uri
-                    break
-        except Exception as e:
-            logger.warning(f"[WordParserWithImages] Failed to discover md dir: {e}")
-            md_target_dir = temp_uri  # fallback
-
-        if not md_target_dir:
-            md_target_dir = temp_uri
+        md_target_dir = await self._discover_md_target_dir(temp_uri)
+        images_dir = f"{md_target_dir}/images"
+        await viking_fs.mkdir(images_dir, exist_ok=True)
 
         logger.info(
-            f"[WordParserWithImages] Saving {len(extracted_images)} images to: {md_target_dir}"
+            f"[WordParserWithImages] Saving {len(extracted_images)} images to: {images_dir}"
         )
 
         for filename, image_bytes in extracted_images:
             try:
-                file_uri = f"{md_target_dir}/{filename}"
+                file_uri = f"{images_dir}/{filename}"
                 await viking_fs.write_file(file_uri, image_bytes)
                 logger.info(
                     f"[WordParserWithImages] Saved image to VikingFS: {file_uri}"

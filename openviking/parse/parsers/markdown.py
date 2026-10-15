@@ -31,6 +31,7 @@ from openviking.parse.parsers.constants import (
     DOCUMENTATION_EXTENSIONS,
     IGNORE_EXTENSIONS,
 )
+from openviking.parse.resource_path import ResourcePathResolver
 from openviking_cli.utils.config.parser_config import ParserConfig
 from openviking_cli.utils.logger import get_logger
 
@@ -159,6 +160,7 @@ class MarkdownParser(BaseParser):
         source_path: Optional[str] = None,
         instruction: str = "",
         base_dir: Optional[Path] = None,
+        resource_vikinguri: Optional[str] = None,
         **kwargs,
     ) -> ParseResult:
         """
@@ -174,6 +176,11 @@ class MarkdownParser(BaseParser):
             source_path: Optional source file path
             instruction: Processing instruction (unused in v5.0)
             base_dir: Base directory for relative paths
+            resource_vikinguri: Root VikingFS URI containing all resources for this
+                                document. References in Markdown are expected to be
+                                relative to this URI (e.g., ``./images/figure.png``).
+                                When Markdown files are split into subdirectories,
+                                references are automatically rewritten.
             **kwargs: Additional runtime options
 
         Returns:
@@ -234,12 +241,14 @@ class MarkdownParser(BaseParser):
             logger.info(f"[MarkdownParser] Found {len(headings)} headings")
 
             # Parse and create directory structure
+            effective_resource_vikinguri = resource_vikinguri or root_dir
             await self._parse_and_create_structure(
                 content,
                 headings,
                 root_dir,
                 source_path,
                 doc_name=self._sanitize_for_path(doc_title),
+                resource_vikinguri=effective_resource_vikinguri,
             )
 
             parse_time = time.time() - start_time
@@ -264,6 +273,7 @@ class MarkdownParser(BaseParser):
             )
 
             result.temp_dir_path = temp_uri
+            result.resource_vikinguri = effective_resource_vikinguri
 
             return result
 
@@ -431,6 +441,7 @@ class MarkdownParser(BaseParser):
         root_dir: str,
         source_path: Optional[str] = None,
         doc_name: Optional[str] = None,
+        resource_vikinguri: Optional[str] = None,
     ) -> None:
         """
         Parse markdown and create directory structure directly in VikingFS.
@@ -447,11 +458,13 @@ class MarkdownParser(BaseParser):
             headings: List of (start, end, title, level) tuples
             root_dir: Root directory URI
             source_path: Source file path for naming
+            resource_vikinguri: Root directory containing resources for this document.
         """
         viking_fs = self._get_viking_fs()
         max_size = self.config.max_section_size or self.DEFAULT_MAX_SECTION_SIZE
         max_chars = self.config.max_section_chars
         min_size = self.DEFAULT_MIN_SECTION_TOKENS
+        resource_vikinguri = resource_vikinguri or root_dir
 
         # Estimate document size
         estimated_tokens = self._estimate_token_count(content)
@@ -468,7 +481,8 @@ class MarkdownParser(BaseParser):
         # Small document: save as single file (check both token and char limits)
         if estimated_tokens <= max_size and len(content) <= max_chars:
             file_path = f"{root_dir}/{doc_name}.md"
-            await viking_fs.write_file(file_path, content)
+            rewritten = self._rewrite_resource_paths(content, root_dir, resource_vikinguri)
+            await viking_fs.write_file(file_path, rewritten)
             logger.debug(f"[MarkdownParser] Small document saved as: {file_path}")
             return
 
@@ -477,7 +491,8 @@ class MarkdownParser(BaseParser):
             logger.info("[MarkdownParser] No headings, splitting by paragraphs")
             parts = self._smart_split_content(content, max_size)
             for part_idx, part in enumerate(parts, 1):
-                await viking_fs.write_file(f"{root_dir}/{doc_name}_{part_idx}.md", part)
+                rewritten = self._rewrite_resource_paths(part, root_dir, resource_vikinguri)
+                await viking_fs.write_file(f"{root_dir}/{doc_name}_{part_idx}.md", rewritten)
             logger.debug(f"[MarkdownParser] Split into {len(parts)} parts")
             return
 
@@ -512,7 +527,14 @@ class MarkdownParser(BaseParser):
 
         # Process sections with merge logic
         await self._process_sections_with_merge(
-            content, headings, root_dir, sections, doc_name, max_size, min_size
+            content,
+            headings,
+            root_dir,
+            sections,
+            doc_name,
+            max_size,
+            min_size,
+            resource_vikinguri=resource_vikinguri,
         )
 
     async def _process_sections_with_merge(
@@ -524,9 +546,11 @@ class MarkdownParser(BaseParser):
         parent_name: str,
         max_size: int,
         min_size: int,
+        resource_vikinguri: Optional[str] = None,
     ) -> None:
         """Process sections with small section merge logic."""
         viking_fs = self._get_viking_fs()
+        resource_vikinguri = resource_vikinguri or parent_dir
 
         # Expand section info
         expanded = [
@@ -549,6 +573,7 @@ class MarkdownParser(BaseParser):
                     buffered_section,
                     max_size,
                     min_size,
+                    resource_vikinguri=resource_vikinguri,
                 )
                 buffered_section = None
 
@@ -560,7 +585,7 @@ class MarkdownParser(BaseParser):
             if tokens < min_size:
                 if pending and sum(t for _, _, t in pending) + tokens > max_size:
                     await flush_buffered()
-                    await self._save_merged(viking_fs, parent_dir, pending)
+                    await self._save_merged(viking_fs, parent_dir, pending, resource_vikinguri=resource_vikinguri)
                     pending = []
                 pending.append((name, content_text, tokens))
                 continue
@@ -571,7 +596,7 @@ class MarkdownParser(BaseParser):
                 # Try merge with pending
                 if self._can_merge(pending, tokens, max_size, has_children):
                     pending.append((name, content_text, tokens))
-                    await self._save_merged(viking_fs, parent_dir, pending)
+                    await self._save_merged(viking_fs, parent_dir, pending, resource_vikinguri=resource_vikinguri)
                     pending = []
                     continue
 
@@ -580,7 +605,7 @@ class MarkdownParser(BaseParser):
                     sec = self._merge_pending_into_next_section(pending, sec)
                     pending = []
                 else:
-                    await self._save_merged(viking_fs, parent_dir, pending)
+                    await self._save_merged(viking_fs, parent_dir, pending, resource_vikinguri=resource_vikinguri)
                     pending = []
             else:
                 await flush_buffered()
@@ -597,7 +622,7 @@ class MarkdownParser(BaseParser):
                 pending = []
             else:
                 await flush_buffered()
-                await self._save_merged(viking_fs, parent_dir, pending)
+                await self._save_merged(viking_fs, parent_dir, pending, resource_vikinguri=resource_vikinguri)
                 pending = []
 
         await flush_buffered()
@@ -673,15 +698,18 @@ class MarkdownParser(BaseParser):
         section: Dict[str, Any],
         max_size: int,
         min_size: int,
+        resource_vikinguri: Optional[str] = None,
     ) -> None:
         """Save a single section (file or directory)."""
         viking_fs = self._get_viking_fs()
         name, tokens, content_text = section["name"], section["tokens"], section["content"]
         has_children = section["has_children"]
+        resource_vikinguri = resource_vikinguri or parent_dir
 
         # Fits in one file (check both token and char limits)
         if tokens <= max_size and len(content_text) <= self.config.max_section_chars:
-            await viking_fs.write_file(f"{parent_dir}/{name}.md", content_text)
+            rewritten = self._rewrite_resource_paths(content_text, parent_dir, resource_vikinguri)
+            await viking_fs.write_file(f"{parent_dir}/{name}.md", rewritten)
             logger.debug(f"[MarkdownParser] Saved: {name}.md")
             return
 
@@ -691,10 +719,19 @@ class MarkdownParser(BaseParser):
 
         if has_children:
             await self._process_children(
-                content, headings, section_dir, section, name, max_size, min_size
+                content,
+                headings,
+                section_dir,
+                section,
+                name,
+                max_size,
+                min_size,
+                resource_vikinguri=resource_vikinguri,
             )
         else:
-            await self._split_content(viking_fs, section_dir, name, content_text, max_size)
+            await self._split_content(
+                viking_fs, section_dir, name, content_text, max_size, resource_vikinguri=resource_vikinguri
+            )
 
     async def _process_children(
         self,
@@ -705,6 +742,7 @@ class MarkdownParser(BaseParser):
         name: str,
         max_size: int,
         min_size: int,
+        resource_vikinguri: Optional[str] = None,
     ) -> None:
         """Build and process child sections."""
         children = []
@@ -722,17 +760,32 @@ class MarkdownParser(BaseParser):
             children.append({"heading_idx": child_idx})
 
         await self._process_sections_with_merge(
-            content, headings, section_dir, children, name, max_size, min_size
+            content,
+            headings,
+            section_dir,
+            children,
+            name,
+            max_size,
+            min_size,
+            resource_vikinguri=resource_vikinguri,
         )
 
     async def _split_content(
-        self, viking_fs, section_dir: str, name: str, content: str, max_size: int
+        self,
+        viking_fs,
+        section_dir: str,
+        name: str,
+        content: str,
+        max_size: int,
+        resource_vikinguri: Optional[str] = None,
     ) -> None:
         """Split content by paragraphs."""
         logger.info(f"[MarkdownParser] Splitting: {name}")
+        resource_vikinguri = resource_vikinguri or section_dir
         parts = self._smart_split_content(content, max_size)
         for i, part in enumerate(parts, 1):
-            await viking_fs.write_file(f"{section_dir}/{name}_{i}.md", part)
+            rewritten = self._rewrite_resource_paths(part, section_dir, resource_vikinguri)
+            await viking_fs.write_file(f"{section_dir}/{name}_{i}.md", rewritten)
 
     def _generate_merged_filename(self, sections: List[Tuple[str, str, int]]) -> str:
         """
@@ -773,7 +826,11 @@ class MarkdownParser(BaseParser):
         return name or "merged"
 
     async def _save_merged(
-        self, viking_fs, parent_dir: str, sections: List[Tuple[str, str, int]]
+        self,
+        viking_fs,
+        parent_dir: str,
+        sections: List[Tuple[str, str, int]],
+        resource_vikinguri: Optional[str] = None,
     ) -> None:
         """Save merged sections as single file with smart naming.
 
@@ -781,6 +838,7 @@ class MarkdownParser(BaseParser):
         by _smart_split_content before writing, so no single file ever exceeds
         the hard character limit.
         """
+        resource_vikinguri = resource_vikinguri or parent_dir
         name = self._generate_merged_filename(sections)
         content = "\n\n".join(c for _, c, _ in sections)
         max_chars = self.config.max_section_chars
@@ -788,12 +846,14 @@ class MarkdownParser(BaseParser):
             max_size = self.config.max_section_size or self.DEFAULT_MAX_SECTION_SIZE
             parts = self._smart_split_content(content, max_size)
             for i, part in enumerate(parts, 1):
-                await viking_fs.write_file(f"{parent_dir}/{name}_{i}.md", part)
+                rewritten = self._rewrite_resource_paths(part, parent_dir, resource_vikinguri)
+                await viking_fs.write_file(f"{parent_dir}/{name}_{i}.md", rewritten)
             logger.debug(
                 f"[MarkdownParser] Merged then split: {name} ({len(sections)} sections → {len(parts)} parts)"
             )
         else:
-            await viking_fs.write_file(f"{parent_dir}/{name}.md", content)
+            rewritten = self._rewrite_resource_paths(content, parent_dir, resource_vikinguri)
+            await viking_fs.write_file(f"{parent_dir}/{name}.md", rewritten)
             logger.debug(f"[MarkdownParser] Merged: {name}.md ({len(sections)} sections)")
 
     def _get_section_info(

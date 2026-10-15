@@ -354,6 +354,12 @@ class ParseResult:
     # Temporary directory path (for v4.0 architecture)
     temp_dir_path: Optional[str] = None  # e.g., "/tmp/openviking_parse_a1b2c3d4"
 
+    # Resource root VikingFS URI for all extracted media/attachments associated
+    # with this document (e.g., "viking://temp/abc/images"). Markdown files may
+    # be split into subdirectories, and references inside them are expected to
+    # be relative to this URI.
+    resource_vikinguri: Optional[str] = None
+
     # Core metadata fields
     source_format: Optional[str] = None  # File format (e.g., "pdf", "markdown")
     parser_name: Optional[str] = None  # Parser name (e.g., "PDFParser")

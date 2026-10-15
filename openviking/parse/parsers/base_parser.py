@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import List, Optional, Union
 
 from openviking.parse.base import ParseResult
+from openviking.parse.resource_path import ResourcePathResolver
 
 
 class BaseParser(ABC):
@@ -113,3 +114,21 @@ class BaseParser(ABC):
             Temporary URI string (e.g., "viking://temp/abc12345")
         """
         return self._get_viking_fs().create_temp_uri()
+
+    def _rewrite_resource_paths(
+        self, content: str, md_dir: str, resource_vikinguri: Optional[str]
+    ) -> str:
+        """
+        Rewrite resource references in Markdown content for the target directory.
+
+        Args:
+            content: Markdown content.
+            md_dir: Directory where the Markdown file will be written.
+            resource_vikinguri: Root VikingFS URI containing all resources for the document.
+
+        Returns:
+            Markdown content with rewritten resource references.
+        """
+        if not resource_vikinguri:
+            return content
+        return ResourcePathResolver(resource_vikinguri).rewrite(content, md_dir)

@@ -28,6 +28,7 @@ from openviking.parse.base import (
 )
 from openviking.parse.parsers.base_parser import BaseParser
 from openviking.parse.parsers.media.constants import MEDIA_EXTENSIONS
+from openviking.parse.resource_path import ResourcePathResolver
 from openviking_cli.utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -377,11 +378,26 @@ class DirectoryParser(BaseParser):
                         dest = f"{target_uri}/{parent}" if parent != "." else target_uri
                     else:
                         dest = target_uri
-                    await DirectoryParser._merge_temp(
-                        viking_fs,
-                        sub_result.temp_dir_path,
-                        dest,
-                    )
+
+                    local_resource_dir = DirectoryParser._detect_resource_dir(src_file)
+                    if local_resource_dir is not None:
+                        await DirectoryParser._copy_local_resources_to_vikingfs(
+                            local_resource_dir, dest, viking_fs
+                        )
+                        await DirectoryParser._merge_temp(
+                            viking_fs,
+                            sub_result.temp_dir_path,
+                            dest,
+                        )
+                        await DirectoryParser._rewrite_resource_paths_in_vikingfs(
+                            viking_fs, dest, dest
+                        )
+                    else:
+                        await DirectoryParser._merge_temp(
+                            viking_fs,
+                            sub_result.temp_dir_path,
+                            dest,
+                        )
                 return True
             except Exception as exc:
                 warnings.append(f"Failed to parse {rel_path}: {exc}")
@@ -398,6 +414,80 @@ class DirectoryParser(BaseParser):
             except Exception as exc:
                 warnings.append(f"Failed to upload {rel_path}: {exc}")
                 return False
+
+    @staticmethod
+    def _detect_resource_dir(src_file: Path) -> Optional[Path]:
+        """Detect the resource root directory for a Markdown file.
+
+        Looks for an ``images/`` subdirectory in any ancestor of *src_file*.
+        The ancestor directory containing ``images/`` is treated as the
+        resource root, and references in the Markdown are expected to be
+        relative to that directory.
+        """
+        for parent in [src_file.parent, *src_file.parents]:
+            images_dir = parent / "images"
+            if images_dir.exists() and images_dir.is_dir():
+                return parent
+        return None
+
+    @staticmethod
+    async def _copy_local_resources_to_vikingfs(
+        local_resource_dir: Path,
+        dest_uri: str,
+        viking_fs: Any,
+    ) -> None:
+        """Copy a local resource directory into the VikingFS destination.
+
+        Only copies ``images/`` and ``tables/`` subdirectories if they exist.
+        """
+        import os
+
+        for subdir_name in ("images", "tables"):
+            local_subdir = local_resource_dir / subdir_name
+            if not local_subdir.exists() or not local_subdir.is_dir():
+                continue
+            dest_subdir_uri = f"{dest_uri}/{subdir_name}"
+            await viking_fs.mkdir(dest_subdir_uri, exist_ok=True)
+            for root, _dirs, files in os.walk(local_subdir):
+                for filename in files:
+                    local_path = Path(root) / filename
+                    rel = local_path.relative_to(local_subdir)
+                    file_dest_uri = f"{dest_subdir_uri}/{rel.as_posix()}"
+                    await viking_fs.write_file(file_dest_uri, local_path.read_bytes())
+
+    @staticmethod
+    async def _rewrite_resource_paths_in_vikingfs(
+        viking_fs: Any,
+        root_uri: str,
+        resource_vikinguri: str,
+    ) -> None:
+        """Rewrite resource references in all Markdown files under *root_uri*."""
+        resolver = ResourcePathResolver(resource_vikinguri)
+
+        async def walk(uri: str) -> None:
+            try:
+                listing = await viking_fs.ls(uri)
+            except Exception:
+                return
+            for entry in listing:
+                name = entry.get("name", "")
+                if not name or name in (".", ".."):
+                    continue
+                full_uri = f"{uri}/{name}"
+                if DirectoryParser._is_dir_entry(entry):
+                    await walk(full_uri)
+                elif name.endswith(".md"):
+                    try:
+                        content = await viking_fs.read_file(full_uri)
+                        rewritten = resolver.rewrite(content, uri)
+                        if rewritten != content:
+                            await viking_fs.write_file(full_uri, rewritten)
+                    except Exception as e:
+                        logger.warning(
+                            f"[DirectoryParser] Failed to rewrite {full_uri}: {e}"
+                        )
+
+        await walk(root_uri)
 
     @staticmethod
     async def _upload_file_directly(
