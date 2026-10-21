@@ -8,6 +8,7 @@ from .html import HTMLParser
 from .markdown import MarkdownParser
 from .pdf import PDFParser
 from .powerpoint import PowerPointParser
+from .powerpoint_v2 import PowerPointParserWithImages
 from .text import TextParser
 from .word import WordParser
 from .word_v2 import WordParserWithImages
@@ -21,6 +22,7 @@ __all__ = [
     "MarkdownParser",
     "PDFParser",
     "PowerPointParser",
+    "PowerPointParserWithImages",
     "TextParser",
     "WordParser",
     "WordParserWithImages",

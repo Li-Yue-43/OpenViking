@@ -24,6 +24,7 @@ from openviking.parse.parsers.markdown import MarkdownParser
 from openviking.parse.parsers.media import AudioParser, ImageParser, VideoParser
 from openviking.parse.parsers.pdf import PDFParser
 from openviking.parse.parsers.powerpoint import PowerPointParser
+from openviking.parse.parsers.powerpoint_v2 import PowerPointParserWithImages
 from openviking.parse.parsers.text import TextParser
 from openviking.parse.parsers.word import WordParser
 from openviking.parse.parsers.word_v2 import WordParserWithImages
@@ -71,7 +72,7 @@ class ParserRegistry:
         # self.register("word", WordParser(config=self._parser_configs.get("word")))
         self.register("word", WordParserWithImages(config=self._parser_configs.get("word")))
         self.register("legacy_doc", LegacyDocParser(config=self._parser_configs.get("legacy_doc")))
-        self.register("powerpoint", PowerPointParser(config=self._parser_configs.get("powerpoint")))
+        self.register("powerpoint", PowerPointParserWithImages(config=self._parser_configs.get("powerpoint")))
         self.register("excel", ExcelParser(config=self._parser_configs.get("excel")))
         self.register("epub", EPubParser(config=self._parser_configs.get("epub")))
         self.register("zip", ZipParser())
