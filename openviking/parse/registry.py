@@ -23,6 +23,7 @@ from openviking.parse.parsers.legacy_doc import LegacyDocParser
 from openviking.parse.parsers.markdown import MarkdownParser
 from openviking.parse.parsers.media import AudioParser, ImageParser, VideoParser
 from openviking.parse.parsers.pdf import PDFParser
+from openviking.parse.parsers.pdf_v2 import PDFParserWithImages
 from openviking.parse.parsers.powerpoint import PowerPointParser
 from openviking.parse.parsers.powerpoint_v2 import PowerPointParserWithImages
 from openviking.parse.parsers.text import TextParser
@@ -65,7 +66,8 @@ class ParserRegistry:
         # Register core parsers
         self.register("text", TextParser(config=self._parser_configs.get("text")))
         self.register("markdown", MarkdownParser(config=self._parser_configs.get("markdown")))
-        self.register("pdf", PDFParser(config=self._parser_configs.get("pdf")))
+        # self.register("pdf", PDFParser(config=self._parser_configs.get("pdf")))
+        self.register("pdf", PDFParserWithImages(config=self._parser_configs.get("pdf")))
         self.register("html", HTMLParser(config=self._parser_configs.get("html")))
 
         # Register markitdown-inspired parsers (built-in)

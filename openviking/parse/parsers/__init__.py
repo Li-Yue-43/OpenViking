@@ -7,6 +7,7 @@ from .excel import ExcelParser
 from .html import HTMLParser
 from .markdown import MarkdownParser
 from .pdf import PDFParser
+from .pdf_v2 import PDFParserWithImages
 from .powerpoint import PowerPointParser
 from .powerpoint_v2 import PowerPointParserWithImages
 from .text import TextParser
@@ -21,6 +22,7 @@ __all__ = [
     "HTMLParser",
     "MarkdownParser",
     "PDFParser",
+    "PDFParserWithImages",
     "PowerPointParser",
     "PowerPointParserWithImages",
     "TextParser",
