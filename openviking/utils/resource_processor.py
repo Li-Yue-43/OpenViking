@@ -330,6 +330,9 @@ class ResourceProcessor:
                     except Exception:
                         pass
 
+            # 唯一目录名可能因重名从 xxx 改为 xxx_1，必须在 reserve 后映射文档 URI。
+            self._set_document_uris(result, root_uri)
+
             # ============ Phase 4: Optional Steps ============
             build_index = kwargs.get("build_index", True)
             temp_uri_for_summarize = temp_uri or parse_result.temp_dir_path
@@ -397,6 +400,16 @@ class ResourceProcessor:
                 result["temp_uri"] = original_temp_uri
 
             return result
+
+    @staticmethod
+    def _set_document_uris(result: Dict[str, Any], root_uri: Optional[str]) -> None:
+        """在唯一资源根目录确定后生成文档 URI，避免重名导入覆盖第一条元数据。"""
+        if not root_uri:
+            return
+        for document in result.get("meta", {}).get("documents") or []:
+            relative_path = document.get("path", "").strip("/")
+            if relative_path:
+                document["uri"] = f"{root_uri}/{relative_path}"
 
     async def _persist_no_summary_failed_requests(
         self,

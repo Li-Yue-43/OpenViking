@@ -255,6 +255,14 @@ class DirectoryParser(BaseParser):
             result.meta["failed_files"] = failed_files
             result.meta["unsupported_files"] = unsupported_files
             result.meta["skipped_files"] = skipped_files
+            # 保留 Elink 等 Accessor 的文档清单，供业务层登记真实文档目录。
+            result.meta.update(kwargs.get("_source_meta") or {})
+            failed_paths = {item["path"].replace("\\", "/") for item in failed_files}
+            documents = result.meta.get("documents") or []
+            result.meta["documents"] = [
+                doc for doc in documents
+                if doc.get("source_file") not in failed_paths
+            ]
 
             return result
 

@@ -312,10 +312,37 @@ async def add_resource(
                     user_id=_ctx.user.user_id,
                     stage="fetching",
                 )
+                # 同一任务等待队列完成，保留 root_uri、meta.documents 等完整导入结果。
+                # 让 ResourceService 内部的队列监控先返回会丢失这些业务登记信息。
                 result = await _add(
                     progress_callback=_progress_callback,
                     stage_callback=_stage_callback,
                 )
+                nested_task_id = result.get("task_id")
+                if nested_task_id:
+                    for _ in range(1200):
+                        nested = await task_tracker.get(
+                            nested_task_id,
+                            account_id=_ctx.account_id,
+                            user_id=_ctx.user.user_id,
+                        )
+                        nested_status = nested.status if nested else None
+                        nested_status_value = getattr(nested_status, "value", nested_status)
+                        if nested_status_value in ("completed", "failed"):
+                            if nested_status_value == "failed":
+                                await task_tracker.fail(
+                                    task.task_id,
+                                    nested.error or "resource queue processing failed",
+                                    account_id=_ctx.account_id,
+                                    user_id=_ctx.user.user_id,
+                                )
+                                return
+                            queue_result = nested.result or {}
+                            result["queue_status"] = queue_result.get("queue_status", queue_result)
+                            break
+                        await asyncio.sleep(3)
+                    else:
+                        raise TimeoutError("resource queue processing timed out")
                 await task_tracker.complete(
                     task.task_id,
                     result,

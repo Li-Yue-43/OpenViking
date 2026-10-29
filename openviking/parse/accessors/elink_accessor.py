@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 
 from openviking_cli.utils.logger import get_logger
 
-from ..elink_oapi import ElinkClient
+from ..elink_oapi import ELINK_BASE_URL, ELINK_HEADERS, ElinkClient
 from .base import DataAccessor, LocalResource, SourceType
 
 logger = get_logger(__name__)
@@ -228,8 +228,11 @@ class ElinkAccessor(DataAccessor):
                 doc_metas.append(
                     {
                         "title": doc.title,
-                        "token": doc.token,
-                        "path": str(md_path.relative_to(temp_dir)),
+                        "doc_token": doc.token,
+                        "obj_type": doc.doc_type,
+                        "wiki_node_token": doc.meta.get("wiki_node_token", ""),
+                        "path": md_path.parent.relative_to(temp_dir).as_posix(),
+                        "source_file": md_path.relative_to(temp_dir).as_posix(),
                         **doc.meta,
                     }
                 )
@@ -265,6 +268,7 @@ class ElinkAccessor(DataAccessor):
             real_type, real_token, title = await self._resolve_wiki_node(token)
             doc_type, token = real_type, real_token
             meta["wiki_resolved"] = True
+            meta["wiki_node_token"] = token
 
         if doc_type != "docx":
             raise ValueError(
@@ -364,12 +368,8 @@ class ElinkAccessor(DataAccessor):
     def _get_client(self):
         if self._client is None:
             self._client = ElinkClient(
-                base_url="https://apigw-cn.yun.hihonor.com/api/open-apis",
-                headers={
-                    "elink-appid": "cli_aaccac7c8338d369",
-                    "X-RY-ID": "40f2c4b11fb0493ba268a9efdd7196bf",
-                    "X-RY-APPKEY": "PzaoezTKriqkcZp93mqvTryH",
-                },
+                base_url=ELINK_BASE_URL,
+                headers=ELINK_HEADERS,
             )
         return self._client
 

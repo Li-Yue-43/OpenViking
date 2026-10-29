@@ -22,6 +22,14 @@ from .wiki_service import ElinkWikiService
 logger = logging.getLogger(__name__)
 
 
+ELINK_BASE_URL = "https://apigw-cn.yun.hihonor.com/api/open-apis"
+ELINK_HEADERS = {
+    "elink-appid": "cli_aaccac7c8338d369",
+    "X-RY-ID": "40f2c4b11fb0493ba268a9efdd7196bf",
+    "X-RY-APPKEY": "PzaoezTKriqkcZp93mqvTryH",
+}
+
+
 class ElinkClient:
     """HTTP client for Elink OpenAPI."""
 
@@ -41,7 +49,7 @@ class ElinkClient:
         self.board = ElinkBoardService(self)
 
     async def request(
-        self, method: str, path: str, params: Optional[dict] = None
+        self, method: str, path: str, params: Optional[dict] = None, json: Optional[dict] = None
     ) -> dict:
         """Send an HTTP request and return JSON response as a dict."""
         url = f"{self.base_url}{path}"
@@ -54,6 +62,7 @@ class ElinkClient:
                         method,
                         url,
                         params=params,
+                        json=json,
                         headers=self.headers,
                     )
                     resp.raise_for_status()
