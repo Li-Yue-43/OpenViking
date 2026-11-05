@@ -8,7 +8,7 @@ scattered across different modules. All configurations inherit from ParserConfig
 and can be loaded from ov.conf files.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
@@ -534,6 +534,59 @@ class FeishuConfig(ParserConfig):
 
 
 @dataclass
+class ElinkEnvironmentConfig:
+    """Gateway and authentication headers for one Elink environment."""
+
+    base_url: str = ""
+    headers: Dict[str, str] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ElinkEnvironmentConfig":
+        raise_unknown_config_fields(
+            data=data,
+            valid_fields={"base_url", "headers"},
+            context_name=cls.__name__,
+        )
+        return cls(**data)
+
+    def validate(self, environment: str) -> None:
+        if not self.base_url or not self.base_url.strip():
+            raise ValueError(f"elink.{environment}.base_url cannot be empty")
+        required_headers = {"elink-appid", "X-RY-ID", "X-RY-APPKEY"}
+        missing_headers = [key for key in required_headers if not self.headers.get(key)]
+        if missing_headers:
+            raise ValueError(
+                f"elink.{environment}.headers is missing required headers: "
+                f"{', '.join(sorted(missing_headers))}"
+            )
+
+
+@dataclass
+class ElinkConfig:
+    """Elink gateway settings for the production and development environments."""
+
+    production: ElinkEnvironmentConfig = field(default_factory=ElinkEnvironmentConfig)
+    development: ElinkEnvironmentConfig = field(default_factory=ElinkEnvironmentConfig)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ElinkConfig":
+        raise_unknown_config_fields(
+            data=data,
+            valid_fields={"production", "development"},
+            context_name=cls.__name__,
+        )
+        return cls(
+            production=ElinkEnvironmentConfig.from_dict(data.get("production") or {}),
+            development=ElinkEnvironmentConfig.from_dict(data.get("development") or {}),
+        )
+
+    def for_environment(self, mode: str) -> ElinkEnvironmentConfig:
+        config = self.production if mode == "production" else self.development
+        config.validate(mode)
+        return config
+
+
+@dataclass
 class DirectoryConfig(ParserConfig):
     """
     Configuration for directory parsing.
@@ -599,6 +652,7 @@ PARSER_CONFIG_REGISTRY = {
     "text": TextConfig,
     "directory": DirectoryConfig,
     "feishu": FeishuConfig,
+    "elink": ElinkConfig,
 }
 
 

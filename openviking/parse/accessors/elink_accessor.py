@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 
 from openviking_cli.utils.logger import get_logger
 
-from ..elink_oapi import ELINK_BASE_URL, ELINK_HEADERS, ElinkClient
+from ..elink_oapi import ElinkClient
 from .base import DataAccessor, LocalResource, SourceType
 
 logger = get_logger(__name__)
@@ -367,9 +367,14 @@ class ElinkAccessor(DataAccessor):
 
     def _get_client(self):
         if self._client is None:
+            from openviking_cli.utils.config import get_openviking_config
+
+            config = get_openviking_config()
+            elink_config = config.elink.for_environment(config.mode)
+            logger.info(f"[ElinkAccessor] Using Elink {config.mode} gateway")
             self._client = ElinkClient(
-                base_url=ELINK_BASE_URL,
-                headers=ELINK_HEADERS,
+                base_url=elink_config.base_url,
+                headers=elink_config.headers,
             )
         return self._client
 

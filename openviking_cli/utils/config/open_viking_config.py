@@ -5,7 +5,7 @@ import logging
 import os
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
@@ -28,6 +28,7 @@ from .parser_config import (
     AudioConfig,
     CodeConfig,
     DirectoryConfig,
+    ElinkConfig,
     FeishuConfig,
     HTMLConfig,
     ImageConfig,
@@ -52,6 +53,11 @@ def _get_config_warning_logger():
 
 class OpenVikingConfig(BaseModel):
     """Main configuration for OpenViking."""
+
+    mode: Literal["production", "development"] = Field(
+        default="production",
+        description="Deployment environment used for environment-specific integrations",
+    )
 
     default_account: Optional[str] = Field(
         default="default", description="Default account identifier"
@@ -121,6 +127,11 @@ class OpenVikingConfig(BaseModel):
     feishu: FeishuConfig = Field(
         default_factory=FeishuConfig,
         description="Feishu/Lark document parsing configuration",
+    )
+
+    elink: ElinkConfig = Field(
+        default_factory=ElinkConfig,
+        description="Elink gateway configuration for production and development",
     )
 
     semantic: SemanticConfig = Field(
@@ -216,6 +227,7 @@ class OpenVikingConfig(BaseModel):
                 "text",
                 "directory",
                 "feishu",
+                "elink",
             ]
             raise_unknown_config_fields(
                 data=config_copy,

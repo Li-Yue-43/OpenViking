@@ -22,14 +22,6 @@ from .wiki_service import ElinkWikiService
 logger = logging.getLogger(__name__)
 
 
-ELINK_BASE_URL = "https://apigw-cn.yun.hihonor.com/api/open-apis"
-ELINK_HEADERS = {
-    "elink-appid": "cli_aaccac7c8338d369",
-    "X-RY-ID": "40f2c4b11fb0493ba268a9efdd7196bf",
-    "X-RY-APPKEY": "PzaoezTKriqkcZp93mqvTryH",
-}
-
-
 class ElinkClient:
     """HTTP client for Elink OpenAPI."""
 
