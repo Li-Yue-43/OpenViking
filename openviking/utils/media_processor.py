@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Optional
 from openviking.parse import DocumentConverter, parse
 from openviking.parse.accessors.base import SourceType
 from openviking.parse.accessors.mime_types import IANA_MEDIA_TYPE_TO_EXTENSION
-from openviking.parse.base import ParseResult
+from openviking.parse.base import NodeType, ParseResult, ResourceNode
 from openviking.parse.parsers.constants import (
     CODE_EXTENSIONS,
     DOCUMENTATION_EXTENSIONS,
@@ -139,6 +139,14 @@ class UnifiedResourceProcessor:
         # Phase 1: Accessor - get local resource
         registry = self._get_accessor_registry()
         local_resource = await registry.access(source, **kwargs)
+
+        if local_resource.meta.get("skip_resource"):
+            return ParseResult(
+                root=ResourceNode(type=NodeType.ROOT),
+                source_path=str(source),
+                source_format="elink",
+                meta=local_resource.meta,
+            )
 
         # Use context manager for automatic cleanup, but preserve directories for TreeBuilder
         try:

@@ -23,6 +23,7 @@ from .embedding_config import EmbeddingConfig
 from .encryption_config import EncryptionConfig
 from .log_config import LogConfig
 from .memory_config import MemoryConfig
+from .mysql_config import MySQLConfig
 from .oauth_config import OAuthConfig
 from .parser_config import (
     AudioConfig,
@@ -67,6 +68,11 @@ class OpenVikingConfig(BaseModel):
 
     storage: StorageConfig = Field(
         default_factory=StorageConfig, description="Storage configuration"
+    )
+
+    mysql: MySQLConfig = Field(
+        default_factory=MySQLConfig,
+        description="Camera knowledge-ingestion metadata database",
     )
 
     embedding: EmbeddingConfig = Field(

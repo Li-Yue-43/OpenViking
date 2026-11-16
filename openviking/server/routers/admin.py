@@ -49,7 +49,7 @@ class SetRoleRequest(BaseModel):
 
 class DeleteFailedSummaryRequest(BaseModel):
     dir_uri: str
-    recursive: bool | None = None
+    need_recursive: bool | None = None
 
 
 class MoveFailedSummaryRequest(BaseModel):
@@ -60,7 +60,7 @@ class MoveFailedSummaryRequest(BaseModel):
 class PersistFailedSummaryRequest(BaseModel):
     dir_uri: str
     error: str
-    recursive: bool = False
+    need_recursive: bool = False
 
 
 def _normalize_dir_uri(uri: str) -> str:
@@ -332,7 +332,7 @@ async def delete_failed_summary(
             result={"deleted": False, "message": "No matching failed summary record found"},
         )
 
-    deleted = delete_failed_summary_record(dir_uri, recursive=body.recursive)
+    deleted = delete_failed_summary_record(dir_uri, need_recursive=body.need_recursive)
     return Response(
         status="ok",
         result={"deleted": deleted, "dir_uri": dir_uri},
@@ -382,7 +382,7 @@ async def persist_failed_summary(
     persist_failed_summary_for_directory(
         dir_uri=dir_uri,
         error=body.error,
-        recursive=body.recursive,
+        need_recursive=body.need_recursive,
     )
     return Response(
         status="ok",

@@ -35,6 +35,14 @@ class ElinkDocument:
     meta: Dict[str, Any]
 
 
+class ElinkAlreadyImportedError(Exception):
+    """Carry a skipped-document result without treating a duplicate as failure."""
+
+    def __init__(self, document: Dict[str, Any]):
+        super().__init__("Elink document already imported")
+        self.document = document
+
+
 class ElinkAccessor(DataAccessor):
     """
     Accessor for Elink (Honor) cloud documents.
@@ -155,6 +163,43 @@ class ElinkAccessor(DataAccessor):
         )
         return is_elink_domain and has_doc_path
 
+    @staticmethod
+    async def _already_imported_skip(
+        *,
+        elink_token: str,
+        obj_type: str,
+        title: str,
+        original_url: str,
+        wiki_node_token: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        from openviking.storage.mysql_knowledge import find_elink_file_owner
+
+        existing = await asyncio.to_thread(find_elink_file_owner, elink_token, obj_type)
+        if not existing:
+            return None
+        return {
+            "elink_token": elink_token,
+            "obj_token": elink_token,
+            "obj_type": obj_type,
+            "wiki_node_token": wiki_node_token,
+            "node_token": wiki_node_token,
+            "title": title or "未命名文档",
+            "original_url": original_url,
+            "reason": "already_imported",
+            "existing_file_path": existing.get("file_path", ""),
+        }
+
+    @staticmethod
+    def _skipped_only_resource(meta: Dict[str, Any]) -> LocalResource:
+        meta["skip_resource"] = True
+        return LocalResource(
+            path=Path(),
+            source_type=SourceType.FEISHU,
+            original_source=meta.get("original_url", ""),
+            meta=meta,
+            is_temporary=False,
+        )
+
     async def access(self, source: Union[str, Path], **kwargs) -> LocalResource:
         source_str = str(source)
         progress_callback = kwargs.pop("progress_callback", None)
@@ -179,8 +224,31 @@ class ElinkAccessor(DataAccessor):
                     token, source_str
                 )
                 meta_doc_type = "wiki"
+                if not docs and skipped_docs and all(
+                    doc.get("reason") == "already_imported" for doc in skipped_docs
+                ):
+                    return self._skipped_only_resource(
+                        {
+                            "elink_doc_type": "wiki",
+                            "elink_token": token,
+                            "elink_title": root_title,
+                            "original_url": source_str,
+                            "documents": [],
+                            "skipped_documents": skipped_docs,
+                        }
+                    )
             else:
-                doc = await self._fetch_document(source_str)
+                try:
+                    doc = await self._fetch_document(source_str)
+                except ElinkAlreadyImportedError as e:
+                    return self._skipped_only_resource(
+                        {
+                            "elink_doc_type": "duplicate",
+                            "original_url": source_str,
+                            "documents": [],
+                            "skipped_documents": [e.document],
+                        }
+                    )
                 docs = [(doc, [])]
                 root_title = doc.title
                 meta_doc_type = doc.doc_type
@@ -261,6 +329,7 @@ class ElinkAccessor(DataAccessor):
 
     async def _fetch_document(self, url: str) -> ElinkDocument:
         doc_type, token = self._parse_elink_url(url)
+        wiki_node_token = token if doc_type == "wiki" else ""
         title = None
         meta = {}
 
@@ -268,7 +337,17 @@ class ElinkAccessor(DataAccessor):
             real_type, real_token, title = await self._resolve_wiki_node(token)
             doc_type, token = real_type, real_token
             meta["wiki_resolved"] = True
-            meta["wiki_node_token"] = token
+            meta["wiki_node_token"] = wiki_node_token
+
+        duplicate = await self._already_imported_skip(
+            elink_token=token,
+            obj_type=doc_type,
+            title=title or "未命名文档",
+            original_url=url,
+            wiki_node_token=wiki_node_token,
+        )
+        if duplicate:
+            raise ElinkAlreadyImportedError(duplicate)
 
         if doc_type != "docx":
             raise ValueError(
@@ -276,12 +355,12 @@ class ElinkAccessor(DataAccessor):
                 f"Only docx is supported in this version."
             )
 
+        meta["original_url"] = url
+
         markdown, doc_title = await self._parse_docx(token)
 
         if title:
             doc_title = title
-
-        meta["original_url"] = url
 
         return ElinkDocument(
             doc_type=doc_type,
@@ -468,24 +547,34 @@ class ElinkAccessor(DataAccessor):
             doc_type = self._WIKI_TYPE_MAP.get(node.obj_type, node.obj_type)
 
             if doc_type == "docx":
-                try:
-                    doc = await self._docx_node_to_document(node, original_url)
-                    results.append((doc, dir_parts))
-                except Exception as e:
-                    skipped.append(
-                        {
-                            "node_token": getattr(node, "node_token", ""),
-                            "obj_token": getattr(node, "obj_token", ""),
-                            "title": getattr(node, "title", ""),
-                            "error": str(e),
-                        }
-                    )
-                    logger.warning(
-                        f"[ElinkAccessor] Skip wiki node {getattr(node, 'node_token', '')} "
-                        f"(obj_token={getattr(node, 'obj_token', '')}, "
-                        f"title={getattr(node, 'title', '')}): {e}",
-                        exc_info=True,
-                    )
+                duplicate = await self._already_imported_skip(
+                    elink_token=node.obj_token,
+                    obj_type=doc_type,
+                    title=node.title or "未命名文档",
+                    original_url=original_url,
+                    wiki_node_token=node.node_token or "",
+                )
+                if duplicate:
+                    skipped.append(duplicate)
+                else:
+                    try:
+                        doc = await self._docx_node_to_document(node, original_url)
+                        results.append((doc, dir_parts))
+                    except Exception as e:
+                        skipped.append(
+                            {
+                                "node_token": getattr(node, "node_token", ""),
+                                "obj_token": getattr(node, "obj_token", ""),
+                                "title": getattr(node, "title", ""),
+                                "error": str(e),
+                            }
+                        )
+                        logger.warning(
+                            f"[ElinkAccessor] Skip wiki node {getattr(node, 'node_token', '')} "
+                            f"(obj_token={getattr(node, 'obj_token', '')}, "
+                            f"title={getattr(node, 'title', '')}): {e}",
+                            exc_info=True,
+                        )
             else:
                 logger.debug(
                     f"[ElinkAccessor] Skipping wiki node {node.node_token} "

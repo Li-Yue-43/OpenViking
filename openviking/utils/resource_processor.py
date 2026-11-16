@@ -7,6 +7,7 @@ Handles coordinated writes and self-iteration processes
 as described in the OpenViking design document.
 """
 
+import asyncio
 import inspect
 import time
 from collections.abc import Callable
@@ -180,6 +181,11 @@ class ResourceProcessor:
                 result["source_path"] = parse_result.source_path or path
                 result["meta"] = parse_result.meta
 
+                if parse_result.meta.get("skip_resource"):
+                    # Every requested Elink document was already registered.
+                    # This is a successful no-op, not a parse failure.
+                    return result
+
                 # Only abort when no temp content was produced at all.
                 # For directory imports partial success (some files failed) is
                 # normal - finalization should still proceed.
@@ -332,6 +338,7 @@ class ResourceProcessor:
 
             # 唯一目录名可能因重名从 xxx 改为 xxx_1，必须在 reserve 后映射文档 URI。
             self._set_document_uris(result, root_uri)
+            await self._register_elink_documents(result)
 
             # ============ Phase 4: Optional Steps ============
             build_index = kwargs.get("build_index", True)
@@ -411,6 +418,25 @@ class ResourceProcessor:
             if relative_path:
                 document["uri"] = f"{root_uri}/{relative_path}"
 
+    @staticmethod
+    async def _register_elink_documents(result: Dict[str, Any]) -> None:
+        """Record parsed Elink documents before optional summarization starts."""
+        from openviking.storage.mysql_knowledge import register_elink_file_owner
+
+        for document in result.get("meta", {}).get("documents") or []:
+            uri = document.get("uri")
+            token = document.get("doc_token")
+            obj_type = document.get("obj_type")
+            if not uri or not token or not obj_type:
+                continue
+            await asyncio.to_thread(
+                register_elink_file_owner,
+                dir_uri=uri,
+                elink_token=token,
+                obj_type=obj_type,
+                wiki_node_token=document.get("wiki_node_token", ""),
+            )
+
     async def _persist_no_summary_failed_requests(
         self,
         root_uri: Optional[str],
@@ -429,7 +455,7 @@ class ResourceProcessor:
         persist_failed_summary_for_directory(
             dir_uri=root_uri,
             error="摘要生成被用户跳过（未生成摘要）",
-            recursive=True,
+            need_recursive=True,
         )
         logger.info(f"[ResourceProcessor] Persisted no-summary request for {root_uri}")
 

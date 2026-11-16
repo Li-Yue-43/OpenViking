@@ -554,7 +554,7 @@ class ReindexExecutor:
         )
         # 任务已提交处理（直接 dequeue），清理对应目录的旧失败摘要记录。
         # 若实际处理失败，内核会重新落盘新的失败记录。
-        delete_failed_summary_record(uri, recursive=recursive)
+        delete_failed_summary_record(uri, need_recursive=recursive)
         await processor.on_dequeue({"data": msg.to_json()}, lock=lock.as_borrowed())
 
     async def _reindex_resource_vectors(

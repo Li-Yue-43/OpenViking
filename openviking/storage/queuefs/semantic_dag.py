@@ -764,7 +764,7 @@ class SemanticDagExecutor:
                     persist_failed_summary_for_directory(
                         dir_uri=parent_uri,
                         error="Directory has failed file summaries",
-                        recursive=False,
+                        need_recursive=False,
                     )
                 else:
                     self._schedule_overview(parent_uri)
@@ -796,7 +796,7 @@ class SemanticDagExecutor:
                     persist_failed_summary_for_directory(
                         dir_uri=parent_uri,
                         error="Directory has failed file summaries",
-                        recursive=False,
+                        need_recursive=False,
                     )
                 else:
                     self._schedule_overview(parent_uri)
@@ -934,7 +934,7 @@ class SemanticDagExecutor:
             persist_failed_summary_for_directory(
                 dir_uri=dir_uri,
                 error=f"Overview generation failed: {e}",
-                recursive=False,
+                need_recursive=False,
             )
         finally:
             self._stats.done_nodes += 1
