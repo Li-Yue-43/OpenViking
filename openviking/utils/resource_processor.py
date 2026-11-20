@@ -338,7 +338,6 @@ class ResourceProcessor:
 
             # 唯一目录名可能因重名从 xxx 改为 xxx_1，必须在 reserve 后映射文档 URI。
             self._set_document_uris(result, root_uri)
-            await self._register_elink_documents(result)
 
             # ============ Phase 4: Optional Steps ============
             build_index = kwargs.get("build_index", True)
@@ -417,25 +416,6 @@ class ResourceProcessor:
             relative_path = document.get("path", "").strip("/")
             if relative_path:
                 document["uri"] = f"{root_uri}/{relative_path}"
-
-    @staticmethod
-    async def _register_elink_documents(result: Dict[str, Any]) -> None:
-        """Record parsed Elink documents before optional summarization starts."""
-        from openviking.storage.mysql_knowledge import register_elink_file_owner
-
-        for document in result.get("meta", {}).get("documents") or []:
-            uri = document.get("uri")
-            token = document.get("doc_token")
-            obj_type = document.get("obj_type")
-            if not uri or not token or not obj_type:
-                continue
-            await asyncio.to_thread(
-                register_elink_file_owner,
-                dir_uri=uri,
-                elink_token=token,
-                obj_type=obj_type,
-                wiki_node_token=document.get("wiki_node_token", ""),
-            )
 
     async def _persist_no_summary_failed_requests(
         self,

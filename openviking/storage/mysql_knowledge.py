@@ -80,36 +80,6 @@ def find_elink_file_owner(elink_token: str, obj_type: str) -> Optional[dict]:
         return dict(row) if row else None
 
 
-def register_elink_file_owner(
-    *,
-    dir_uri: str,
-    elink_token: str,
-    obj_type: str,
-    wiki_node_token: str = "",
-) -> bool:
-    """Register token/path as soon as the parsed document has a final URI.
-
-    The backend later enriches owner and timestamps. Empty values here must not
-    erase metadata which has already been registered.
-    """
-    relative_path = resource_relative_path(dir_uri)
-    if not relative_path:
-        raise ValueError(f"Elink document URI is outside resources: {dir_uri}")
-    with knowledge_mysql_connection() as conn, conn.cursor() as cursor:
-        cursor.execute(
-            """INSERT INTO file_owners
-               (file_path, owner, elink_token, wiki_node_token, obj_type)
-               VALUES (%s, '', %s, %s, %s)
-               ON DUPLICATE KEY UPDATE
-               elink_token = VALUES(elink_token),
-               wiki_node_token = IF(VALUES(wiki_node_token) = '', wiki_node_token, VALUES(wiki_node_token)),
-               obj_type = VALUES(obj_type)""",
-            (relative_path, elink_token, wiki_node_token or "", obj_type),
-        )
-        conn.commit()
-        return True
-
-
 @contextmanager
 def failed_task_write_lock(conn) -> Iterator[None]:
     """Serialize directory dedup/replacement across OpenViking processes.
