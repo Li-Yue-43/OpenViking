@@ -50,6 +50,14 @@ def _is_skip_file(name: str) -> bool:
     # board_*.json are raw node data files produced by the Elink parser.
     if name.startswith("board_") and name.endswith(".json"):
         return True
+    # Large-image derived artifacts are not summarized/vectorized on their own:
+    # - ``tiles/`` directory holds image fragments and the preserved original;
+    # - ``*_grid.jpg`` is a navigation overlay (red boxes + tile labels).
+    # Only the ``*_preview.jpg`` participates in semantic retrieval.
+    if name == "tiles":
+        return True
+    if name.endswith("_grid.jpg"):
+        return True
     return False
 
 

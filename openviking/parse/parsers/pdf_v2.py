@@ -102,6 +102,7 @@ class PDFParserWithImages(PDFParser, ImageResourceMixin):
             temp_dir_path = result.temp_dir_path
             if temp_dir_path and extracted_images:
                 await self._copy_images_to_vikingfs(temp_dir_path, extracted_images)
+                await self._rewrite_image_references(temp_dir_path)
                 md_target_dir = await self._discover_md_target_dir(temp_dir_path)
                 resource_vikinguri = md_target_dir
                 await self._rewrite_md_resource_paths(temp_dir_path, resource_vikinguri)

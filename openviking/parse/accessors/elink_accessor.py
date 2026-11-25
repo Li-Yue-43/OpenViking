@@ -383,10 +383,14 @@ class ElinkAccessor(DataAccessor):
         image_tokens = {m.group(2) for m in image_matches}
         image_token_to_path: Dict[str, str] = {}
         for i, token in enumerate(image_tokens):
-            save_path = images_dir / f"image_{i + 1}.png"
+            original_name = f"image_{i + 1}.png"
+            save_path = images_dir / original_name
             try:
                 await client.drive.v1.medias.download(token, save_path)
-                image_token_to_path[token] = f"./images/image_{i + 1}.png"
+                # Handle oversized images in place (preview/grid/tiles), matching
+                # ImageParser semantics, and rewrite the reference if split.
+                referenced_name = self._process_downloaded_image(save_path)
+                image_token_to_path[token] = f"./images/{referenced_name}"
             except Exception as e:
                 logger.warning(f"[ElinkAccessor] Failed to download image {token}: {e}")
 
@@ -466,6 +470,28 @@ class ElinkAccessor(DataAccessor):
         safe = safe[:100]
         safe = safe.strip(" .")
         return safe
+
+    @staticmethod
+    def _process_downloaded_image(save_path: Path) -> str:
+        """Process a downloaded image in place for oversized-image handling.
+
+        Reuses the shared large-image pipeline so Elink-imported images behave
+        identically to images parsed by ``ImageParser``. Returns the filename
+        that should be referenced by Markdown (the original name for small
+        images, or the preview filename for split large images).
+        """
+        from openviking.parse.parsers.media.image_resource_writer import (
+            process_embedded_image_file,
+        )
+
+        try:
+            preview_filename = process_embedded_image_file(save_path)
+            return preview_filename if preview_filename else save_path.name
+        except Exception as e:
+            logger.warning(
+                f"[ElinkAccessor] Failed to process downloaded image {save_path}: {e}"
+            )
+            return save_path.name
 
     @staticmethod
     def _unique_path(path: Path) -> Path:

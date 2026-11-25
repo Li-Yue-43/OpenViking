@@ -13,6 +13,7 @@ from openviking.utils.failed_summary_persistence import (
     get_failed_summary_record,
     persist_failed_summary_for_directory,
 )
+from openviking.utils.image_search import prepare_image_bytes_for_model
 from openviking.utils.simulate_summary_failure import should_simulate_summary_failure
 from openviking_cli.utils.config import get_openviking_config
 from openviking_cli.utils.logger import get_logger
@@ -30,31 +31,32 @@ def _is_svg(data: bytes) -> bool:
     return data[:4] == b"<svg" or (data[:5] == b"<?xml" and b"<svg" in data[:100])
 
 
-# SVG to PNG conversion (disabled by default)
-# Uncomment and install dependencies if you need SVG support:
-#   Ubuntu/Debian: sudo apt-get install libcairo2 && pip install cairosvg
-#   macOS: brew install cairo && pip install cairosvg
-#   Or use ImageMagick: sudo apt-get install libmagickwand-dev && pip install Wand
-#
-# def _convert_svg_to_png(svg_data: bytes) -> Optional[bytes]:
-#     """Convert SVG to PNG using cairosvg or wand."""
-#     try:
-#         import cairosvg
-#         return cairosvg.svg2png(bytestring=svg_data)
-#     except ImportError:
-#         pass
-#     except OSError:
-#         pass  # libcairo not installed
-#
-#     try:
-#         from wand.image import Image as WandImage
-#         with WandImage(blob=svg_data, format='svg') as img:
-#             img.format = 'png'
-#             return img.make_blob()
-#     except ImportError:
-#         pass
-#
-#     return None
+def _convert_svg_to_png(svg_data: bytes) -> Optional[bytes]:
+    """Convert SVG to PNG using cairosvg or wand.
+
+    Dependencies:
+      Ubuntu/Debian: sudo apt-get install libcairo2 && pip install cairosvg
+      macOS: brew install cairo && pip install cairosvg
+    """
+    try:
+        import cairosvg
+
+        return cairosvg.svg2png(bytestring=svg_data)
+    except ImportError:
+        pass
+    except OSError:
+        pass  # libcairo not installed
+
+    try:
+        from wand.image import Image as WandImage
+
+        with WandImage(blob=svg_data, format="svg") as img:
+            img.format = "png"
+            return img.make_blob()
+    except ImportError:
+        pass
+
+    return None
 
 
 def get_media_type(source_path: Optional[str], source_format: Optional[str]) -> Optional[str]:
@@ -121,7 +123,8 @@ async def generate_image_summary(
         Dictionary with "name" and "summary" keys
     """
     viking_fs = get_viking_fs()
-    vlm = get_openviking_config().vlm
+    config = get_openviking_config()
+    vlm = config.vlm
     file_name = original_filename
 
     simulated_error = should_simulate_summary_failure()
@@ -156,7 +159,12 @@ async def generate_image_summary(
         async with llm_sem or asyncio.Semaphore(1):
             response = await vlm.get_vision_completion_async(
                 prompt=prompt,
-                images=[image_bytes],
+                images=[
+                    prepare_image_bytes_for_model(
+                        image_bytes,
+                        config=getattr(config, "image", None),
+                    )
+                ],
             )
 
         logger.info(

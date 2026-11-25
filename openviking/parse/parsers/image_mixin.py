@@ -25,12 +25,17 @@ helpers need ``self._get_viking_fs()``; with a plain utility every call
 site would have to pass the VikingFS instance explicitly.
 """
 
+import re
 from typing import List, Tuple
 
 from openviking.parse.resource_path import ResourcePathResolver
 from openviking_cli.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Match Markdown image/link references so we can rewrite the referenced
+# filename (basename) when a large image is replaced by its preview.
+_IMAGE_REF_RE = re.compile(r"(!?\[[^\]]*\]\()([^)]+)(\))")
 
 
 class ImageResourceMixin:
@@ -98,6 +103,11 @@ class ImageResourceMixin:
         as the Markdown files (``resource_vikinguri``), and Markdown
         references use ``./images/{filename}`` so that MarkdownParser can
         rewrite them when splitting content into subdirectories.
+
+        Oversized images are handled by the shared large-image pipeline so
+        document-embedded images behave identically to standalone images
+        parsed by ``ImageParser``: large images become preview/grid/tiles and
+        their Markdown references are rewritten to point at the preview.
         """
         viking_fs = self._get_viking_fs()
 
@@ -109,17 +119,65 @@ class ImageResourceMixin:
             f"[ImageResourceMixin] Saving {len(extracted_images)} images to: {images_dir}"
         )
 
-        for filename, image_bytes in extracted_images:
+        from openviking.parse.parsers.media.image_resource_writer import (
+            write_embedded_images,
+        )
+
+        rewrite_map = await write_embedded_images(
+            viking_fs,
+            images_dir,
+            extracted_images,
+            config=self._image_config(),
+        )
+        self._image_reference_rewrite_map = rewrite_map
+
+    def _image_config(self):
+        """Resolve the ImageConfig for large-image thresholds.
+
+        Subclasses may provide ``self.config`` as an ImageConfig; otherwise the
+        default ImageConfig is returned (which carries the same defaults used
+        by ImageParser).
+        """
+        from openviking_cli.utils.config.parser_config import ImageConfig
+
+        config = getattr(self, "config", None)
+        return config if isinstance(config, ImageConfig) else ImageConfig()
+
+    async def _rewrite_image_references(self, temp_uri: str) -> None:
+        """Rewrite Markdown image references for images replaced by previews.
+
+        Walks all ``.md`` files under ``temp_uri`` and replaces the referenced
+        basename (e.g. ``image_1.png``) with the preview filename produced by
+        the large-image pipeline. Only files whose basename appears in the
+        rewrite map are touched; the relative path prefix is preserved.
+        """
+        rewrite_map = getattr(self, "_image_reference_rewrite_map", None) or {}
+        if not rewrite_map:
+            return
+
+        viking_fs = self._get_viking_fs()
+
+        async def walk(uri: str) -> None:
             try:
-                file_uri = f"{images_dir}/{filename}"
-                await viking_fs.write_file(file_uri, image_bytes)
-                logger.info(
-                    f"[ImageResourceMixin] Saved image to VikingFS: {file_uri}"
-                )
-            except Exception as e:
-                logger.warning(
-                    f"[ImageResourceMixin] Failed to save image {filename}: {e}"
-                )
+                listing = await viking_fs.ls(uri)
+            except Exception:
+                return
+            for entry in listing:
+                full_uri = f"{uri}/{entry['name']}"
+                if entry.get("isDir", False):
+                    await walk(full_uri)
+                elif entry.get("name", "").endswith(".md"):
+                    try:
+                        content = await viking_fs.read_file(full_uri)
+                        rewritten = _rewrite_image_filenames(content, rewrite_map)
+                        if rewritten != content:
+                            await viking_fs.write_file(full_uri, rewritten)
+                    except Exception as e:
+                        logger.warning(
+                            f"[ImageResourceMixin] Failed to rewrite image refs in {full_uri}: {e}"
+                        )
+
+        await walk(temp_uri)
 
     def _guess_extension(self, content_type: str, fallback_index: int) -> str:
         """Guess file extension from content type."""
@@ -135,3 +193,36 @@ class ImageResourceMixin:
             "image/x-tiff": "tiff",
         }
         return type_map.get(content_type, "png")
+
+
+def _rewrite_image_filenames(content: str, rewrite_map: dict) -> str:
+    """Rewrite the basename of Markdown image/link references.
+
+    For each ``![alt](path)`` or ``[text](path)`` reference, if the final path
+    segment matches a key in ``rewrite_map``, replace it with the mapped value
+    (e.g. ``./images/image_1.png`` -> ``./images/image_1_preview.jpg``). The
+    relative prefix is preserved.
+    """
+
+    def replacer(match):
+        lead = match.group(1)
+        ref = match.group(2)
+        trail = match.group(3)
+
+        if "://" in ref or ref.startswith("data:"):
+            return match.group(0)
+
+        # Split directory prefix and basename.
+        if "/" in ref:
+            prefix, _, basename = ref.rpartition("/")
+        else:
+            prefix, basename = "", ref
+
+        if basename in rewrite_map:
+            new_basename = rewrite_map[basename]
+            new_ref = f"{prefix}/{new_basename}" if prefix else new_basename
+            return f"{lead}{new_ref}{trail}"
+
+        return match.group(0)
+
+    return _IMAGE_REF_RE.sub(replacer, content)
