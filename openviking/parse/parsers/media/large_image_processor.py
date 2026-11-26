@@ -133,8 +133,8 @@ def create_low_res_preview(
     img = img.copy()
     original_width, original_height = img.size
 
-    # Convert to RGB if needed (for PNGs with alpha)
-    if img.mode in ("RGBA", "P"):
+    # Convert to RGB if needed (handles L/LA/P/RGBA/I/CMYK and other modes).
+    if img.mode != "RGB":
         img = img.convert("RGB")
 
     # Resize if larger than max dimension
@@ -269,8 +269,9 @@ def split_image_into_tiles(
             x1, y1, x2, y2 = positions[tile_idx]
             tile_img = img.crop((x1, y1, x2, y2))
 
-            # Convert to RGB if needed (skip for PNG to preserve alpha)
-            if not is_png and tile_img.mode in ("RGBA", "P"):
+            # Convert to RGB if needed (skip for PNG to preserve alpha).
+            # Handles L/LA/P/RGBA/I/CMYK and other non-RGB modes.
+            if not is_png and tile_img.mode != "RGB":
                 tile_img = tile_img.convert("RGB")
 
             tile_bytes = save_image_to_bytes(
@@ -362,7 +363,7 @@ def create_grid_overlay(
     new_h = int(oh * ratio)
 
     overlay_img = img.copy()
-    if overlay_img.mode in ("RGBA", "P"):
+    if overlay_img.mode != "RGB":
         overlay_img = overlay_img.convert("RGB")
     overlay_img = overlay_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
